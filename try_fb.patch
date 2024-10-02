@@ -1,0 +1,812 @@
+From 687b38264a21b64f7807770537c92ca60fa06388 Mon Sep 17 00:00:00 2001
+From: Patch Creator <patch@example.com>
+Date: Thu, 27 Mar 2025 10:01:01 +0800
+Subject: [PATCH] Patch commit
+
+---
+ CMakeLists.txt | 210 +++++++++++++++++++++++++++++++++++++++++++++++++
+ a.sh           |  24 ++++++
+ benchmarks.cpp | 153 +++++++++++++++++++++++++++++++++++
+ encoding.cpp   | 161 +++++++++++++++++++++++++++++++++++++
+ encoding.hpp   |  46 +++++++++++
+ main.cpp       | 133 +++++++++++++++++++++++++++++++
+ schema.fbs     |  12 +++
+ 7 files changed, 739 insertions(+)
+ create mode 100644 CMakeLists.txt
+ create mode 100755 a.sh
+ create mode 100644 benchmarks.cpp
+ create mode 100644 encoding.cpp
+ create mode 100644 encoding.hpp
+ create mode 100644 main.cpp
+ create mode 100644 schema.fbs
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..3c2b244
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,210 @@
++cmake_minimum_required(VERSION 3.20) # C++23 and modern FetchContent features
++project(FlatbufferFetchExample LANGUAGES CXX)
++
++set(CMAKE_CXX_STANDARD 23)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++
++include(FetchContent)
++
++#############################################################################
++# --- Fetch and configure FlatBuffers ---
++#############################################################################
++FetchContent_Declare(
++  flatbuffers
++  GIT_REPOSITORY https://github.com/google/flatbuffers.git
++  GIT_TAG        v25.2.10 # Update as needed for newer versions
++  GIT_SHALLOW    TRUE
++)
++
++# Make flatbuffers available
++FetchContent_GetProperties(flatbuffers)
++if(NOT flatbuffers_POPULATED)
++  FetchContent_Populate(flatbuffers)
++  # Add the flatbuffers project. This will define targets like 'flatbuffers' (library) and 'flatc' (executable).
++  option(FLATBUFFERS_BUILD_TESTS "Build FlatBuffers tests" OFF)
++  add_subdirectory(${flatbuffers_SOURCE_DIR} ${flatbuffers_BINARY_DIR})
++endif()
++
++# Ensure the flatc target exists (optional, but good practice)
++if(NOT TARGET flatc)
++    message(FATAL_ERROR "The 'flatc' executable target was not found after adding FlatBuffers. Check the FlatBuffers CMake configuration.")
++endif()
++set(FLATC_TARGET flatc) # Use the target name
++
++#############################################################################
++# --- Fetch and configure Catch2 ---
++#############################################################################
++FetchContent_Declare(
++  Catch2
++  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
++  GIT_TAG        v3.6.0 # Use a recent v3 tag
++  GIT_SHALLOW    TRUE
++)
++
++FetchContent_MakeAvailable(Catch2)
++# Catch2 v3 provides the Catch2WithMain target which includes the main function
++
++#############################################################################
++# --- Schema Compilation Configuration ---
++#############################################################################
++
++# CONFIGURABLE: Set the output directory for generated headers
++set(FLATBUFFERS_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-flatbuffers" CACHE PATH "Directory for generated FlatBuffers headers")
++
++# Create the output directory if it doesn't exist
++file(MAKE_DIRECTORY ${FLATBUFFERS_GEN_DIR})
++
++# List to store all generated header files
++set(GENERATED_HEADERS)
++
++#############################################################################
++# --- Function: Add FlatBuffer Schema ---
++#############################################################################
++# This function adds a schema file to be compiled with flatc
++# Usage:
++#   add_flatbuffer_schema(
++#     SCHEMA "path/to/schema.fbs"           # Required: Path to the schema file (absolute or relative to CMAKE_CURRENT_SOURCE_DIR recommended)
++#     OUTPUT_NAME "my_schema_generated.h"   # Optional: Custom output file name (defaults to <schema_name>_generated.h)
++#   )
++function(add_flatbuffer_schema)
++  # Parse arguments
++  set(options)
++  set(oneValueArgs SCHEMA OUTPUT_NAME)
++  set(multiValueArgs)
++  cmake_parse_arguments(FB "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
++
++  # Validate required arguments
++  if(NOT FB_SCHEMA)
++    message(FATAL_ERROR "add_flatbuffer_schema: SCHEMA argument is required")
++  endif()
++
++  # Ensure the schema file exists
++  if(NOT EXISTS "${FB_SCHEMA}")
++     message(FATAL_ERROR "add_flatbuffer_schema: Schema file does not exist: ${FB_SCHEMA}")
++  endif()
++
++  # Get schema file name without extension
++  get_filename_component(SCHEMA_NAME ${FB_SCHEMA} NAME_WE)
++  get_filename_component(SCHEMA_FILENAME ${FB_SCHEMA} NAME) # Full filename
++
++  # Set output file name (use custom name if provided, otherwise default)
++  if(FB_OUTPUT_NAME)
++    set(OUTPUT_FILE "${FLATBUFFERS_GEN_DIR}/${FB_OUTPUT_NAME}")
++  else()
++    set(OUTPUT_FILE "${FLATBUFFERS_GEN_DIR}/${SCHEMA_NAME}_generated.h")
++  endif()
++
++  # Add custom command to generate header from schema
++  add_custom_command(
++    OUTPUT ${OUTPUT_FILE}
++    # Use the flatc target via generator expression
++    COMMAND $<TARGET_FILE:${FLATC_TARGET}>
++    # Arguments for flatc
++    ARGS --cpp -o ${FLATBUFFERS_GEN_DIR} ${FB_SCHEMA}
++    # Dependencies: The command re-runs if the schema or flatc changes
++    DEPENDS ${FB_SCHEMA} ${FLATC_TARGET}
++    COMMENT "Generating C++ from FlatBuffers schema: ${SCHEMA_FILENAME} -> ${OUTPUT_FILE}"
++    VERBATIM
++    USES_TERMINAL # Might provide better output formatting/coloring
++  )
++
++  # Add the generated file to the global list
++  set(GENERATED_HEADERS ${GENERATED_HEADERS} ${OUTPUT_FILE} PARENT_SCOPE)
++
++  # Group generated file in IDEs (optional, but helpful)
++  source_group("Generated Files\\FlatBuffers" FILES ${OUTPUT_FILE})
++
++endfunction()
++
++#############################################################################
++# --- Add your schema files here ---
++#############################################################################
++
++# Add the default schema file (using absolute path is robust)
++add_flatbuffer_schema(SCHEMA "${CMAKE_CURRENT_SOURCE_DIR}/schema.fbs")
++
++# Example of how to add additional schema files:
++# set(MY_SCHEMAS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/schemas")
++# add_flatbuffer_schema(SCHEMA "${MY_SCHEMAS_DIR}/another_schema.fbs")
++# add_flatbuffer_schema(
++#   SCHEMA "${MY_SCHEMAS_DIR}/custom_schema.fbs"
++#   OUTPUT_NAME "my_custom_generated.h" # Specify a custom output name
++# )
++
++# Create a target that depends on all generated headers.
++# This ensures all custom commands run when this target is built.
++add_custom_target(
++  generate_flatbuffer_headers ALL # Add 'ALL' to make it run by default
++  DEPENDS ${GENERATED_HEADERS}
++  COMMENT "Ensuring all FlatBuffers headers are generated"
++)
++
++#############################################################################
++# --- Encoding Library ---
++#############################################################################
++
++# Add the encoding library
++add_library(encoding STATIC
++  encoding.cpp
++  encoding.hpp
++)
++
++# Set modern C++ standard for the library
++target_compile_features(encoding PRIVATE cxx_std_23)
++
++#############################################################################
++# --- Main Application ---
++#############################################################################
++
++# Add the main executable
++add_executable(MyFlatbufferApp main.cpp)
++
++# Make the executable depend on the header generation target
++add_dependencies(MyFlatbufferApp generate_flatbuffer_headers)
++
++# Add include paths
++target_include_directories(MyFlatbufferApp PRIVATE
++  ${FLATBUFFERS_GEN_DIR}  # Include the generated headers directory
++  ${CMAKE_CURRENT_SOURCE_DIR}  # For encoding.hpp
++)
++
++# Link against the flatbuffers runtime library and encoding library
++target_link_libraries(MyFlatbufferApp PRIVATE 
++  flatbuffers
++  encoding
++)
++
++#############################################################################
++# --- Benchmark Application ---
++#############################################################################
++
++# Add the benchmark executable
++add_executable(MyFlatbufferBenchmarks benchmarks.cpp)
++
++# Make the benchmark executable depend on the header generation target
++add_dependencies(MyFlatbufferBenchmarks generate_flatbuffer_headers)
++
++# Add include paths for benchmarks (same as main app)
++target_include_directories(MyFlatbufferBenchmarks PRIVATE
++  ${FLATBUFFERS_GEN_DIR}
++  ${CMAKE_CURRENT_SOURCE_DIR}  # For encoding.hpp
++)
++
++# Link benchmarks against Catch2, Flatbuffers and encoding library
++target_link_libraries(MyFlatbufferBenchmarks PRIVATE
++  Catch2::Catch2WithMain # Provides Catch2 framework + main()
++  flatbuffers            # For FlatBuffers runtime
++  encoding              # Our encoding library
++)
++
++#############################################################################
++# --- Debug Information / Optional ---
++#############################################################################
++
++# Uncomment to print debug information during CMake configuration
++# message(STATUS "FlatBuffers source dir: ${flatbuffers_SOURCE_DIR}")
++# message(STATUS "FlatBuffers binary dir: ${flatbuffers_BINARY_DIR}")
++# message(STATUS "FlatBuffers generated headers dir: ${FLATBUFFERS_GEN_DIR}")
++# message(STATUS "FlatBuffers generated headers list: ${GENERATED_HEADERS}")
++# message(STATUS "Using flatc executable from target: ${FLATC_TARGET}")
++# message(STATUS "Catch2 source dir: ${Catch2_SOURCE_DIR}")
+\ No newline at end of file
+diff --git a/a.sh b/a.sh
+new file mode 100755
+index 0000000..1709171
+--- /dev/null
++++ b/a.sh
+@@ -0,0 +1,24 @@
++#!/bin/bash
++cd `dirname $0`
++
++set -ueo pipefail
++
++# Clean previous build (optional but good practice when changing CMakeLists)
++# rm -rf build
++
++mkdir -p build
++echo "build/" > .gitignore
++
++# Configure
++cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
++
++# Build both targets
++cmake --build build --target MyFlatbufferApp --target MyFlatbufferBenchmarks
++
++echo "--- Running Main App ---"
++build/MyFlatbufferApp
++
++echo -e "\n--- Running Benchmarks ---"
++# Run benchmarks, optionally selecting specific tags or listing benchmarks
++# build/MyFlatbufferBenchmarks "[benchmark]" # Run all benchmarks tagged [benchmark]
++build/MyFlatbufferBenchmarks                  # Run all benchmarks
+\ No newline at end of file
+diff --git a/benchmarks.cpp b/benchmarks.cpp
+new file mode 100644
+index 0000000..36def6e
+--- /dev/null
++++ b/benchmarks.cpp
+@@ -0,0 +1,153 @@
++#define CATCH_CONFIG_MAIN // Provides main() function
++#include <catch2/catch_test_macros.hpp>
++#include <catch2/benchmark/catch_benchmark.hpp>
++
++#include <vector>
++#include <string>
++#include <string_view>
++#include <chrono>
++#include <cstdint>
++#include <span>
++
++// Include necessary headers
++#include "schema_generated.h"
++#include "encoding.hpp"
++
++// --- Benchmark Setup ---
++
++// Helper function to create sample FlatBuffer data
++std::vector<uint8_t> create_sample_flatbuffer() {
++    flatbuffers::FlatBufferBuilder builder(1024);
++    auto message_content = builder.CreateString("Benchmark data string!");
++    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
++                         std::chrono::system_clock::now().time_since_epoch())
++                         .count();
++    bool urgent = false;
++    std::vector<int32_t> int_values = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
++    auto values_vector = builder.CreateVector(int_values);
++
++    ExampleData::MessageBuilder message_builder(builder);
++    message_builder.add_content(message_content);
++    message_builder.add_timestamp(timestamp);
++    message_builder.add_is_urgent(urgent);
++    message_builder.add_values(values_vector);
++    builder.Finish(message_builder.Finish());
++
++    auto buffer_span = builder.GetBufferSpan();
++    return {buffer_span.begin(), buffer_span.end()}; // Copy to vector
++}
++
++// --- Benchmarks ---
++
++TEST_CASE("Encoding Benchmarks", "[benchmark][encoding]") {
++    auto original_data = create_sample_flatbuffer();
++    std::span<const uint8_t> data_span = original_data;
++
++    // Create strategies to ensure proper type deduction
++    auto base64_strategy = make_strategy("Base64", base64_encode, base64_decode);
++    auto hex_strategy = make_strategy("Hex", hex_encode, hex_decode);
++    auto none_strategy = make_strategy("None", noop_encode, noop_decode);
++
++    BENCHMARK("Base64 Encode") {
++        return base64_strategy.encode(data_span);
++    };
++
++    BENCHMARK("Hex Encode") {
++        return hex_strategy.encode(data_span);
++    };
++
++    BENCHMARK("No-op Encode") {
++        return none_strategy.encode(data_span);
++    };
++}
++
++TEST_CASE("Decoding Benchmarks", "[benchmark][decoding]") {
++    auto original_data = create_sample_flatbuffer();
++    std::span<const uint8_t> data_span = original_data;
++
++    // Create strategies to ensure proper type deduction
++    auto base64_strategy = make_strategy("Base64", base64_encode, base64_decode);
++    auto hex_strategy = make_strategy("Hex", hex_encode, hex_decode);
++    auto none_strategy = make_strategy("None", noop_encode, noop_decode);
++
++    // Pre-encode the data for decoding benchmarks
++    std::string base64_encoded = base64_strategy.encode(data_span);
++    std::string hex_encoded = hex_strategy.encode(data_span);
++    std::string noop_encoded = none_strategy.encode(data_span);
++
++    BENCHMARK("Base64 Decode") {
++        return base64_strategy.decode(base64_encoded);
++    };
++
++    BENCHMARK("Hex Decode") {
++        return hex_strategy.decode(hex_encoded);
++    };
++
++    BENCHMARK("No-op Decode") {
++        return none_strategy.decode(noop_encoded);
++    };
++}
++
++TEST_CASE("FlatBuffers Benchmarks", "[benchmark][flatbuffers]") {
++    // Data for serialization benchmark
++    std::string content_str = "Benchmark data string for serialization!";
++    int64_t timestamp_val = std::chrono::duration_cast<std::chrono::milliseconds>(
++                               std::chrono::system_clock::now().time_since_epoch())
++                               .count();
++    bool urgent_val = true;
++    std::vector<int32_t> values_vec = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512};
++
++    BENCHMARK("FlatBuffers Serialize") {
++        flatbuffers::FlatBufferBuilder builder(1024); // Create builder inside benchmark
++        auto message_content = builder.CreateString(content_str);
++        auto values_vector = builder.CreateVector(values_vec);
++
++        ExampleData::MessageBuilder message_builder(builder);
++        message_builder.add_content(message_content);
++        message_builder.add_timestamp(timestamp_val);
++        message_builder.add_is_urgent(urgent_val);
++        message_builder.add_values(values_vector);
++        auto msg_offset = message_builder.Finish();
++        builder.Finish(msg_offset);
++        // Returning the span size or similar might prevent optimization
++        return builder.GetSize();
++    };
++
++    // Data for deserialization benchmark
++    auto serialized_data = create_sample_flatbuffer(); // Create once outside
++
++    BENCHMARK("FlatBuffers Deserialize (Verify + Access)") {
++        // Verification (optional but good practice)
++        flatbuffers::Verifier verifier(serialized_data.data(), serialized_data.size());
++        if (!ExampleData::VerifyMessageBuffer(verifier)) {
++            throw std::runtime_error("Verification failed during benchmark setup");
++        }
++        // Access
++        auto message = ExampleData::GetMessage(serialized_data.data());
++        // Access fields to simulate usage
++        auto content = message->content()->string_view();
++        auto ts = message->timestamp();
++        auto urgent = message->is_urgent();
++        int32_t first_val = 0;
++        if (message->values() && message->values()->size() > 0) {
++            first_val = message->values()->Get(0);
++        }
++        // Return something derived from accessed data to prevent optimization
++        return content.length() + ts + (urgent ? 1 : 0) + first_val;
++    };
++
++     BENCHMARK("FlatBuffers Deserialize (Access Only)") {
++        // Assumes data is already verified if needed
++        auto message = ExampleData::GetMessage(serialized_data.data());
++        // Access fields to simulate usage
++        auto content = message->content()->string_view();
++        auto ts = message->timestamp();
++        auto urgent = message->is_urgent();
++        int32_t first_val = 0;
++        if (message->values() && message->values()->size() > 0) {
++            first_val = message->values()->Get(0);
++        }
++        // Return something derived from accessed data to prevent optimization
++        return content.length() + ts + (urgent ? 1 : 0) + first_val;
++    };
++} 
+\ No newline at end of file
+diff --git a/encoding.cpp b/encoding.cpp
+new file mode 100644
+index 0000000..a5e83e9
+--- /dev/null
++++ b/encoding.cpp
+@@ -0,0 +1,161 @@
++#include "encoding.hpp"
++#include <algorithm>
++#include <iomanip>
++#include <sstream>
++#include <stdexcept>
++
++namespace {
++constexpr std::string_view base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
++                                         "abcdefghijklmnopqrstuvwxyz"
++                                         "0123456789+/";
++}
++
++auto base64_encode(std::span<const uint8_t> data) -> std::string {
++    std::string result;
++    result.reserve(((data.size() + 2) / 3) * 4);
++
++    std::size_t i = 0;
++    std::array<uint8_t, 3> bytes{};
++    while (i < data.size()) {
++        bytes[0] = data[i++];
++        bytes[1] = (i < data.size()) ? data[i++] : 0;
++        bytes[2] = (i < data.size()) ? data[i++] : 0;
++
++        result += base64_chars[bytes[0] >> 2];
++        result += base64_chars[((bytes[0] & 0x03) << 4) | (bytes[1] >> 4)];
++        result += (i < data.size() + 1) ? base64_chars[((bytes[1] & 0x0f) << 2) | (bytes[2] >> 6)] : '=';
++        result += (i < data.size() + 0) ? base64_chars[bytes[2] & 0x3f] : '=';
++    }
++
++    size_t padding_count = (3 - (data.size() % 3)) % 3;
++    if (padding_count > 0 && result.size() >= 1) result[result.size() - 1] = '=';
++    if (padding_count > 1 && result.size() >= 2) result[result.size() - 2] = '=';
++
++    return result;
++}
++
++auto base64_decode(std::string_view encoded) -> std::vector<uint8_t> {
++    std::vector<uint8_t> result;
++    result.reserve(encoded.size() * 3 / 4);
++    std::string current_chunk;
++    current_chunk.reserve(4);
++    size_t padding_chars = 0;
++
++    for(char c : encoded) {
++        if (std::isspace(static_cast<unsigned char>(c))) continue;
++
++        if (c == '=') {
++            current_chunk += c;
++            padding_chars++;
++            if (padding_chars > 2) {
++                throw std::runtime_error("Invalid Base64: More than two padding characters.");
++            }
++        } else {
++            if (padding_chars > 0) {
++                throw std::runtime_error("Invalid Base64: Character found after padding.");
++            }
++            size_t pos = base64_chars.find(c);
++            if (pos == std::string_view::npos) {
++                throw std::runtime_error(std::string("Invalid Base64 character: ") + c);
++            }
++            current_chunk += c;
++        }
++
++        if (current_chunk.length() == 4) {
++            std::array<uint8_t, 4> chunk_indices{};
++            for(size_t i = 0; i < 4; ++i) {
++                if (current_chunk[i] == '=') {
++                    chunk_indices[i] = 0;
++                } else {
++                    size_t pos_val = base64_chars.find(current_chunk[i]);
++                    if(pos_val == std::string_view::npos) {
++                        throw std::runtime_error("Internal error during base64 decode indexing.");
++                    }
++                    chunk_indices[i] = static_cast<uint8_t>(pos_val);
++                }
++            }
++
++            result.push_back((chunk_indices[0] << 2) | (chunk_indices[1] >> 4));
++
++            if (current_chunk[2] != '=') {
++                result.push_back((chunk_indices[1] << 4) | (chunk_indices[2] >> 2));
++                if (current_chunk[3] != '=') {
++                    result.push_back((chunk_indices[2] << 6) | chunk_indices[3]);
++                }
++            }
++
++            if (current_chunk[2] == '=' && current_chunk[3] != '=') {
++                throw std::runtime_error("Invalid Base64 Padding: '=' found in 3rd position but not 4th.");
++            }
++
++            current_chunk.clear();
++        }
++    }
++
++    if (!current_chunk.empty()) {
++        bool only_padding_or_ws = true;
++        for(char c : current_chunk) {
++            if (c != '=' && !std::isspace(static_cast<unsigned char>(c))) {
++                only_padding_or_ws = false;
++                break;
++            }
++        }
++        if (!only_padding_or_ws) {
++            throw std::runtime_error("Invalid Base64: Trailing characters or incomplete chunk.");
++        }
++    }
++
++    return result;
++}
++
++auto hex_encode(std::span<const uint8_t> data) -> std::string {
++    std::stringstream ss;
++    ss << std::hex << std::setfill('0');
++    for (uint8_t byte : data) {
++        ss << std::setw(2) << static_cast<int>(byte);
++    }
++    return ss.str();
++}
++
++auto hex_decode(std::string_view encoded) -> std::vector<uint8_t> {
++    std::string clean_encoded;
++    for(char c : encoded) {
++        if (!std::isspace(static_cast<unsigned char>(c))) {
++            clean_encoded += c;
++        }
++    }
++
++    if (clean_encoded.length() % 2 != 0) {
++        throw std::runtime_error("Invalid Hex string: Odd length after removing whitespace.");
++    }
++    std::vector<uint8_t> result;
++    result.reserve(clean_encoded.length() / 2);
++
++    for (size_t i = 0; i < clean_encoded.length(); i += 2) {
++        std::string byte_str = clean_encoded.substr(i, 2);
++        try {
++            if (byte_str.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
++                throw std::invalid_argument("Invalid Hex character found");
++            }
++            unsigned long byte_val = std::stoul(byte_str, nullptr, 16);
++            if (byte_val > 255) {
++                throw std::out_of_range("Hex value exceeds 255");
++            }
++            result.push_back(static_cast<uint8_t>(byte_val));
++        } catch (const std::invalid_argument& e) {
++            throw std::runtime_error("Invalid Hex character in string: '" + byte_str + "'");
++        } catch (const std::out_of_range& e) {
++            throw std::runtime_error("Hex value out of range for conversion: '" + byte_str + "'");
++        }
++    }
++    return result;
++}
++
++auto noop_encode(std::span<const uint8_t> data) -> std::string {
++    return std::string(reinterpret_cast<const char*>(data.data()), data.size());
++}
++
++auto noop_decode(std::string_view encoded) -> std::vector<uint8_t> {
++    const uint8_t* begin_ptr = reinterpret_cast<const uint8_t*>(encoded.data());
++    return std::vector<uint8_t>(begin_ptr, begin_ptr + encoded.size());
++} 
+\ No newline at end of file
+diff --git a/encoding.hpp b/encoding.hpp
+new file mode 100644
+index 0000000..d6950fc
+--- /dev/null
++++ b/encoding.hpp
+@@ -0,0 +1,46 @@
++#pragma once
++
++#include <array>
++#include <concepts>
++#include <cstdint>
++#include <span>
++#include <string>
++#include <string_view>
++#include <vector>
++
++// --- Interface Definition ---
++template <typename T>
++concept Encoder = requires(T e, std::span<const uint8_t> data) {
++  { e(data) } -> std::same_as<std::string>;
++};
++
++template <typename T>
++concept Decoder = requires(T d, std::string_view encoded) {
++  { d(encoded) } -> std::same_as<std::vector<uint8_t>>;
++};
++
++template <Encoder TEncoder, Decoder TDecoder> struct EncodingStrategy {
++  std::string name;
++  TEncoder encode;
++  TDecoder decode;
++};
++
++// --- Base64 Functions ---
++auto base64_encode(std::span<const uint8_t> data) -> std::string;
++auto base64_decode(std::string_view encoded) -> std::vector<uint8_t>;
++
++// --- Hex Functions ---
++auto hex_encode(std::span<const uint8_t> data) -> std::string;
++auto hex_decode(std::string_view encoded) -> std::vector<uint8_t>;
++
++// --- No-op Functions ---
++auto noop_encode(std::span<const uint8_t> data) -> std::string;
++auto noop_decode(std::string_view encoded) -> std::vector<uint8_t>;
++
++// Helper function to create an EncodingStrategy
++template <Encoder TEncoder, Decoder TDecoder>
++auto make_strategy(std::string name, TEncoder &&encoder, TDecoder &&decoder) {
++  return EncodingStrategy<TEncoder, TDecoder>{std::move(name),
++                                              std::forward<TEncoder>(encoder),
++                                              std::forward<TDecoder>(decoder)};
++}
+\ No newline at end of file
+diff --git a/main.cpp b/main.cpp
+new file mode 100644
+index 0000000..ffb8a22
+--- /dev/null
++++ b/main.cpp
+@@ -0,0 +1,133 @@
++#include <algorithm>
++#include <array>
++#include <bit>
++#include <chrono>
++#include <cstdint>
++#include <functional>
++#include <iomanip>
++#include <iostream>
++#include <iterator>
++#include <ranges>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++#include <string_view>
++#include <vector>
++#include <span>
++
++// Include the header generated by flatc
++#include "schema_generated.h"
++
++// Include our encoding library
++#include "encoding.hpp"
++
++// --- Helper Function to Demonstrate Encoding/Decoding ---
++template<Encoder TEncoder, Decoder TDecoder>
++void demonstrate_encoding(std::span<const uint8_t> original_buffer, 
++                        const EncodingStrategy<TEncoder, TDecoder>& strategy) {
++    std::cout << "\n--- Testing Strategy: " << strategy.name << " ---\n";
++
++    // --- Encoding ---
++    std::string encoded_str;
++    try {
++        encoded_str = strategy.encode(original_buffer);
++        std::cout << "Encoded (" << strategy.name << "): ";
++        // Avoid printing potentially huge/binary strings directly for "None"
++        if (strategy.name == "None") {
++            std::cout << "<" << encoded_str.length() << " bytes of raw data>" << std::endl;
++        } else {
++             std::cout << encoded_str << std::endl;
++        }
++    } catch (const std::exception& e) {
++        std::cerr << "Encoding failed: " << e.what() << std::endl;
++        return; // Cannot proceed without encoded data
++    }
++
++    // --- Decoding ---
++    std::vector<uint8_t> decoded_buffer;
++    try {
++        decoded_buffer = strategy.decode(encoded_str);
++        std::cout << "Decoded size: " << decoded_buffer.size() << " bytes\n";
++
++        // Basic check: Does decoded size match original?
++        if (decoded_buffer.size() != original_buffer.size()) {
++             std::cerr << "Error: Decoded size (" << decoded_buffer.size()
++                       << ") does not match original size (" << original_buffer.size() << ")!\n";
++        }
++    } catch (const std::exception& e) {
++        std::cerr << "Decoding failed: " << e.what() << std::endl;
++        return; // Cannot proceed without decoded data
++    }
++
++    // --- Deserialization & Verification ---
++    if (decoded_buffer.empty()) {
++      std::cerr << "Decoded data is empty, cannot verify!\n";
++      return;
++    }
++
++    std::cout << "Verifying FlatBuffer data...\n";
++    flatbuffers::Verifier verifier(decoded_buffer.data(), decoded_buffer.size());
++    if (!ExampleData::VerifyMessageBuffer(verifier)) {
++        std::cerr << "Verification failed for " << strategy.name << "!\n";
++        // If "None" failed, print a warning about the encoding method
++        if (strategy.name == "None") {
++             std::cerr << "[Warning: The 'None' encoding is unsafe and might have corrupted the data.]\n";
++        }
++        return;
++    }
++    std::cout << "Verification successful.\n";
++
++    // --- Access Data ---
++    auto message = ExampleData::GetMessage(decoded_buffer.data());
++    std::cout << "Content: " << message->content()->string_view() << "\n"
++              << "Timestamp: " << message->timestamp() << "\n"
++              << "Urgent: " << (message->is_urgent() ? "Yes" : "No") << "\n";
++    if (message->values()) {
++        std::cout << "Values: [";
++        bool first = true;
++        for (int32_t val : *message->values()) {
++            if (!first) std::cout << ", ";
++            std::cout << val;
++            first = false;
++        }
++        std::cout << "]\n";
++    } else {
++        std::cout << "Values: (Not present)\n";
++    }
++}
++
++int main() {
++  flatbuffers::FlatBufferBuilder builder(1024);
++
++  // --- Serialization (once) ---
++  std::cout << "--- Serializing Original Data ---\n";
++  auto message_content = builder.CreateString("Hello, generalized encoding!");
++  auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
++                       std::chrono::system_clock::now().time_since_epoch())
++                       .count();
++  bool urgent = true;
++  std::vector<int32_t> int_values = {1, 1, 2, 3, 5, 8, -13}; // Fibonacci-ish
++  auto values_vector = builder.CreateVector(int_values);
++
++  ExampleData::MessageBuilder message_builder(builder);
++  message_builder.add_content(message_content);
++  message_builder.add_timestamp(timestamp);
++  message_builder.add_is_urgent(urgent);
++  message_builder.add_values(values_vector);
++  builder.Finish(message_builder.Finish());
++
++  auto original_buffer = builder.GetBufferSpan();
++  std::cout << "Serialized size: " << original_buffer.size() << " bytes\n";
++
++  // --- Define Strategies ---
++  auto base64_strategy = make_strategy("Base64", base64_encode, base64_decode);
++  auto hex_strategy = make_strategy("Hex", hex_encode, hex_decode);
++  auto none_strategy = make_strategy("None", noop_encode, noop_decode); // UNSAFE!
++
++  // --- Demonstrate each strategy ---
++  demonstrate_encoding(original_buffer, base64_strategy);
++  demonstrate_encoding(original_buffer, hex_strategy);
++  demonstrate_encoding(original_buffer, none_strategy); // Expect potential failure/warning
++
++  return 0;
++} 
+\ No newline at end of file
+diff --git a/schema.fbs b/schema.fbs
+new file mode 100644
+index 0000000..e961550
+--- /dev/null
++++ b/schema.fbs
+@@ -0,0 +1,12 @@
++// Updated schema file: schema.fbs
++namespace ExampleData;
++
++table Message {
++  content: string;
++  timestamp: long;
++  is_urgent: bool = false;
++  values: [int]; // Added: Vector of 32-bit integers
++}
++
++root_type Message;
++
+-- 
+2.43.0
+

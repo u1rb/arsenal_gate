@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la)",
+      "Bash(find . -name \"*.md\" -o -name \"*.json\" -o -name \"*.py\" -o -name \"*.js\" -o -name \"*.ts\")"
+    ],
+    "deny": []
+  }
+}

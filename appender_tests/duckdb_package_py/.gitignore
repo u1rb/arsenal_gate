@@ -1,0 +1,5 @@
+dist/
+duckdb_package/lib/
+duckdb_package/bin/
+duckdb_package.egg-info/
+

@@ -1,0 +1,121 @@
+diff --git a/hashmap_bench/CMakeLists.txt b/hashmap_bench/CMakeLists.txt
+new file mode 100644
+index 0000000..17dbcde
+--- /dev/null
++++ b/hashmap_bench/CMakeLists.txt
+@@ -0,0 +1,31 @@
++cmake_minimum_required(VERSION 3.24)
++project(unordered_dense_bench LANGUAGES CXX)
++
++set(CMAKE_CXX_STANDARD 23)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++
++include(FetchContent)
++
++# -------- Catch2 v3 ----------------------------------------------------------
++FetchContent_Declare(
++  catch2
++  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
++  GIT_TAG        v3.5.4
++)
++FetchContent_MakeAvailable(catch2)
++
++# -------- ankerl::unordered_dense -------------------------------------------
++FetchContent_Declare(
++  unordered_dense
++  GIT_REPOSITORY https://github.com/martinus/unordered_dense.git
++  GIT_TAG        v4.5.0
++)
++FetchContent_MakeAvailable(unordered_dense)
++
++add_executable(bench src/bench.cpp)
++
++target_link_libraries(bench PRIVATE Catch2::Catch2WithMain) # brings <catch2/...> + main()
++target_include_directories(bench PRIVATE
++    ${unordered_dense_SOURCE_DIR}/include)                  # header‑only
++# Recommended for benchmarks
++target_compile_options(bench PRIVATE -O3 -march=native)
+diff --git a/hashmap_bench/run.sh b/hashmap_bench/run.sh
+new file mode 100644
+index 0000000..ed4dbbb
+--- /dev/null
++++ b/hashmap_bench/run.sh
+@@ -0,0 +1,6 @@
++# From the project root
++cd `dirname $0`
++mkdir -p build
++cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
++cmake --build build -j
++./build/bench
+diff --git a/hashmap_bench/src/bench.cpp b/hashmap_bench/src/bench.cpp
+new file mode 100644
+index 0000000..f968293
+--- /dev/null
++++ b/hashmap_bench/src/bench.cpp
+@@ -0,0 +1,66 @@
++#include <ankerl/unordered_dense.h>
++#include <catch2/benchmark/catch_benchmark.hpp>
++#include <catch2/catch_test_macros.hpp>
++
++#include <cstdint>
++#include <random>
++#include <vector>
++
++// --------------------- helper ------------------------------------------------
++static std::vector<std::uint64_t>
++make_random_keys(std::size_t n, std::uint64_t seed = 0xC0FFEE) {
++  std::mt19937_64 rng(seed);
++  std::uniform_int_distribution<std::uint64_t> dist;
++  std::vector<std::uint64_t> keys;
++  keys.reserve(n);
++  for (std::size_t i = 0; i < n; ++i)
++    keys.push_back(dist(rng));
++  return keys;
++}
++
++// --------------------- benchmark --------------------------------------------
++TEST_CASE("unordered_dense read / find latency", "[bench]") {
++  constexpr std::size_t N = 1'000'0; // adjust to taste
++
++  // pre‑generate once; Catch2 reuses the same test case for each BENCHMARK run
++  static const auto keys = make_random_keys(N);
++
++  ankerl::unordered_dense::map<std::uint64_t, std::uint64_t> map;
++  map.reserve(N);
++  for (auto k : keys)
++    map.emplace(k, k);
++
++  REQUIRE(map.size() == N); // sanity
++
++  // Random number generator for selecting random keys
++  std::random_device rd;
++  std::mt19937 gen(rd());
++  std::uniform_int_distribution<std::size_t> dist(0, N - 1);
++
++  // Pre-generate a set of random indices to use
++  constexpr std::size_t NUM_LOOKUPS =
++      10000; // Number of random keys to pre-generate
++  std::vector<std::uint64_t> random_keys;
++  random_keys.reserve(NUM_LOOKUPS);
++  for (std::size_t i = 0; i < NUM_LOOKUPS; ++i) {
++    random_keys.push_back(keys[dist(gen)]);
++  }
++
++  // Index to keep track of current position in the random_keys vector
++  std::size_t idx = 0;
++
++  BENCHMARK("find single random key") {
++    // Get next key from pre-generated random keys
++    auto random_key = random_keys[idx];
++
++    // Increment and wrap index (without using modulus)
++    idx++;
++    if (idx >= random_keys.size()) {
++      idx = 0;
++    }
++
++    // Find the key in the map
++    auto it = map.find(random_key);
++    return it != map.end() ? 1 : 0; // Return to prevent optimization
++  };
++}

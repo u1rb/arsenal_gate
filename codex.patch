@@ -1,0 +1,84 @@
+diff --git a/try_codex/a.sh b/try_codex/a.sh
+new file mode 100644
+index 0000000..974c799
+--- /dev/null
++++ b/try_codex/a.sh
+@@ -0,0 +1,4 @@
++source try_codex/keys.sh
++
++bunx @openai/codex@latest --model o4-mini --full-auto
++# bunx @openai/codex@latest --full-auto --model gpt-4.1-mini
+diff --git a/try_codex/a2.sh b/try_codex/a2.sh
+new file mode 100644
+index 0000000..acd471f
+--- /dev/null
++++ b/try_codex/a2.sh
+@@ -0,0 +1,5 @@
++export OPENAI_API_KEY="sk-1234"
++export OPENAI_BASE_URL=http://127.0.0.1:4000
++
++# bunx @openai/codex@latest --full-auto --model gemini-2.5-pro
++bunx @openai/codex@latest --full-auto --model gemini-2.5-flash
+diff --git a/try_codex/litellm_config.yaml b/try_codex/litellm_config.yaml
+new file mode 100644
+index 0000000..4e5ada8
+--- /dev/null
++++ b/try_codex/litellm_config.yaml
+@@ -0,0 +1,35 @@
++model_list:
++  - model_name: "gemini-2.5-pro"
++    litellm_params:
++      model: "hosted_vllm/gemini-2.5-pro-preview-03-25"
++      api_base: "https://aihubmix.com/v1"
++      api_key: os.environ/OPENAI_API_KEY
++
++  - model_name: "gemini-2.5-flash"
++    litellm_params:
++      model: "hosted_vllm/gemini-2.5-flash-preview-04-17"
++      api_base: "https://aihubmix.com/v1"
++      api_key: os.environ/OPENAI_API_KEY
++
++  - model_name: "gemini-2.5-flash-nothink"
++    litellm_params:
++      model: "hosted_vllm/gemini-2.5-flash-preview-04-17-nothink"
++      api_base: "https://aihubmix.com/v1"
++      api_key: os.environ/OPENAI_API_KEY
++
++  - model_name: "deepseek-v3"
++    litellm_params:
++      model: "hosted_vllm/DeepSeek-V3"
++      api_base: "https://aihubmix.com/v1"
++      api_key: os.environ/OPENAI_API_KEY
++
++  - model_name: "claude-3-7"
++    litellm_params:
++      model: "hosted_vllm/claude-3-7-sonnet-20250219"
++      api_base: "https://aihubmix.com/v1"
++      api_key: os.environ/OPENAI_API_KEY
++      
++
++litellm_settings:
++  drop_params: True
++  set_verbose: True
+\ No newline at end of file
+diff --git a/try_codex/run_litellm.sh b/try_codex/run_litellm.sh
+new file mode 100644
+index 0000000..0a59412
+--- /dev/null
++++ b/try_codex/run_litellm.sh
+@@ -0,0 +1,14 @@
++
++cd `dirname $0`
++
++source keys.sh
++# export LITELLM_LOG=DEBUG
++
++uvx --with "litellm[proxy]" litellm --config litellm_config.yaml --detailed_debug
++
++# docker run \
++#     -v $(pwd)/litellm_config.yaml:/app/config.yaml \
++#     -e OPENAI_API_KEY:$OPENAI_API_KEY \
++#     -p 4000:4000 \
++#     ghcr.io/berriai/litellm:main-latest \
++#     --config /app/config.yaml
+\ No newline at end of file

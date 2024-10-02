@@ -1,0 +1,313 @@
+diff --git a/fb_schema_4/CMakeLists.txt b/fb_schema_4/CMakeLists.txt
+new file mode 100644
+index 0000000..bec279e
+--- /dev/null
++++ b/fb_schema_4/CMakeLists.txt
+@@ -0,0 +1,32 @@
++include(FetchContent)
++
++FetchContent_Declare(
++  flatbuffers
++  URL https://github.com/google/flatbuffers/archive/refs/tags/v25.2.10.zip
++  CMAKE_ARGS
++    -DFLATBUFFERS_BUILD_TESTS=OFF
++    -DFLATBUFFERS_STRICT_MODE=ON
++)
++
++FetchContent_MakeAvailable(flatbuffers)
++
++set(MY_FBS_FILES
++  "${CMAKE_CURRENT_SOURCE_DIR}/schema.fbs"
++  "${CMAKE_CURRENT_SOURCE_DIR}/schema_itch.fbs"
++)
++
++flatbuffers_generate_headers(
++  TARGET schema_generated_h1
++  SCHEMAS ${MY_FBS_FILES}
++  INCLUDE_PREFIX "fb_schema"
++)
++
++add_library(flatbuffers_interface INTERFACE)
++
++target_link_libraries(flatbuffers_interface INTERFACE 
++  flatbuffers
++  schema_generated_h1
++)
++add_dependencies(flatbuffers_interface GENERATE_schema_generated_h1)
++
++
+diff --git a/fb_schema_4/schema.fbs b/fb_schema_4/schema.fbs
+new file mode 100644
+index 0000000..07a9e3f
+--- /dev/null
++++ b/fb_schema_4/schema.fbs
+@@ -0,0 +1,38 @@
++// Example schema.fbs
++namespace MyGame.Sample;
++
++enum Color:byte { Red = 0, Green, Blue = 2 }
++
++union Equipment { Weapon, Orb } // Defined later
++
++struct Vec3 {
++  x:float;
++  y:float;
++  z:float;
++}
++
++table Monster {
++  pos:Vec3;
++  mana:short = 150;
++  hp:short = 100;
++  name:string (required);
++  friendly:bool = false (deprecated);
++  inventory:[ubyte];
++  color:Color = Blue;
++  weapons:[Weapon];
++  equipped:Equipment;
++  path:[Vec3];
++}
++
++table Weapon {
++  name:string;
++  damage:short;
++}
++
++table Orb {
++  name:string;
++  power:float;
++}
++
++root_type Monster;
++
+diff --git a/fb_schema_4/schema_itch.fbs b/fb_schema_4/schema_itch.fbs
+new file mode 100644
+index 0000000..5142be4
+--- /dev/null
++++ b/fb_schema_4/schema_itch.fbs
+@@ -0,0 +1,225 @@
++// itch.fbs
++namespace Itch;
++
++// Enum corresponding to BUY_SELL in C++
++enum BuySell : byte { Unknown = 0, Buy = 1, Sell = 2 }
++
++// Base types corresponding to C++ enums/aliases
++table Timestamp { nanoseconds: ulong; }
++table Oid { id: ulong; } // Order ID
++table Price { value: uint; } // Price (fixed point, needs scaling factor defined elsewhere)
++table Qty { shares: uint; } // Quantity
++
++// Add Order Message ('A')
++table AddOrder {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  oid: Oid;
++  buy_sell: BuySell;
++  qty: Qty;
++  stock_symbol: string; // Assuming based on common ITCH specs, not explicitly in struct
++  price: Price;
++}
++
++// Add Order with MPID Attribution ('F')
++// Note: This seems to just wrap AddOrder in the C++ code.
++// Flatbuffers doesn't directly support inheritance like this,
++// but you could achieve composition or use a union.
++// Here's a simple representation, assuming the MPID is a 4-char string.
++table AddOrderMpid {
++  add_order: AddOrder;
++  mpid: string; // Market Participant ID
++}
++
++// Order Executed Message ('E')
++table ExecuteOrder {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  oid: Oid;
++  qty: Qty;
++  match_number: ulong; // Assuming based on common ITCH specs
++}
++
++// Order Executed With Price Message ('C')
++// Similar to AddOrderMpid, wraps ExecuteOrder. Adds price.
++table ExecuteOrderWithPrice {
++  execute_order: ExecuteOrder;
++  printable: bool; // Assuming based on common ITCH specs
++  price: Price;
++  match_number: ulong; // Redundant if ExecuteOrder has it, but mimicking C++ structure
++}
++
++// Order Cancel/Reduce Message ('X')
++table ReduceOrder {
++  stock_locate: ushort; // Not in C++ struct, but likely needed from context
++  timestamp: Timestamp;
++  oid: Oid;
++  qty: Qty; // New quantity after reduction
++}
++
++// Order Delete Message ('D')
++table DeleteOrder {
++  stock_locate: ushort; // Not in C++ struct, but likely needed from context
++  timestamp: Timestamp;
++  oid: Oid;
++}
++
++// Order Replace Message ('U')
++table ReplaceOrder {
++  stock_locate: ushort; // Not in C++ struct, but likely needed from context
++  timestamp: Timestamp; // Not in C++ struct, common in ITCH
++  original_oid: Oid;
++  new_oid: Oid;
++  new_qty: Qty;
++  new_price: Price;
++}
++
++// Non-Displayable Order Message ('P') - Trade Message
++// Needs more info from specs, C++ only has code 'P'
++table Trade {
++    stock_locate: ushort;
++    timestamp: Timestamp;
++    oid: Oid; // Assuming this maps to Order Reference Number
++    buy_sell: BuySell; // Assuming this maps to Printable flag somehow? Or side.
++    qty: Qty;
++    stock_symbol: string;
++    price: Price;
++    match_number: ulong;
++}
++
++// Cross Trade Message ('Q')
++// Needs more info from specs, C++ only has code 'Q'
++table CrossTrade {
++    stock_locate: ushort;
++    shares: ulong; // Using ulong based on common ITCH spec size for cross shares
++    stock_symbol: string;
++    cross_price: Price;
++    match_number: ulong;
++    cross_type: uint8; // e.g., 'O' Opening, 'C' Closing, 'H' Halt, 'I' Intraday
++    timestamp: Timestamp;
++}
++
++// Broken Trade Message ('B')
++// Needs more info from specs, C++ only has code 'B'
++table BrokenTrade {
++    stock_locate: ushort; // Not present, inferring
++    timestamp: Timestamp; // Not present, inferring
++    match_number: ulong;
++}
++
++// --- Other message types mentioned in itch_t enum ---
++// These structs weren't fully defined in the provided itch.h snippet.
++// Placeholder tables based on common ITCH specs:
++
++table SystemEvent {
++  stock_locate: ushort; // Placeholder
++  timestamp: Timestamp;
++  event_code: uint8; // e.g., 'O' Start messages, 'S' Start system, 'Q' Start quotes, 'M' Start trades, 'E' End messages, 'C' End system
++}
++
++table StockDirectory {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  stock_symbol: string;
++  market_category: uint8; // e.g., 'Q' Nasdaq Global Select, 'G' Global, 'S' Capital
++  financial_status: uint8; // e.g., 'D' Deficient, 'E' Delinquent, 'Q' Bankrupt, 'S' Suspended, 'G' Deficient+Bankrupt, 'H' Deficient+Delinquent, 'J' Delinquent+Bankrupt, 'K' Deficient+Delinquent+Bankrupt
++  round_lot_size: uint;
++  round_lots_only: bool;
++  issue_classification: uint8; // e.g., 'A' American Depository Share, 'C' Common Stock, 'F' Foreign, 'I' Intra-dealer automated system, 'L' Limited Partnership, 'O' Ordinary Share, 'P' Preferred Stock, 'Q' Other Securities, 'R' Right, 'S' Shares of Beneficial Interest, 'T' Test, 'U' Unit, 'V' Contingent Value Right, 'W' Warrant, 'Y' ADR
++  issue_sub_type: string; // e.g., 'A', 'B', 'C', etc. or combinations like 'A ', 'AI'
++  authenticity: uint8; // 'P' Production, 'T' Test
++  short_sale_threshold: bool; // 'Y'/'N' usually, bool simplifies
++  ipo_flag: bool; // 'Y'/'N'
++  luld_reference_price_tier: uint8; // '1' or '2'
++  etp_flag: bool; // 'Y'/'N'
++  etp_leverage_factor: uint;
++  inverse_indicator: bool; // 'Y'/'N'
++}
++
++table TradingAction {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  stock_symbol: string;
++  trading_state: uint8; // e.g., 'H' Halted, 'Q' Quote Only, 'T' Trading
++  reserved: uint8;
++  reason: string;
++}
++
++table RegShoRestriction {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  stock_symbol: string;
++  reg_sho_action: uint8; // '0' No restriction, '1' Restricted, '2' Restriction lifted
++}
++
++table MarketParticipantPosition {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  mpid: string;
++  stock_symbol: string;
++  primary_mmaker: bool; // 'Y'/'N'
++  mmaker_mode: uint8; // 'N' Normal, 'P' Passive, 'S' Syndicate, 'R' Pre-syndicate, 'L' Penalty
++  mmaker_status: uint8; // 'A' Active, 'E' Excused, 'W' Withdrawn, 'S' Suspended, 'D' Deleted
++}
++
++table MwcbDeclineLevel {
++  stock_locate: ushort; // Placeholder
++  timestamp: Timestamp;
++  level1: Price;
++  level2: Price;
++  level3: Price;
++}
++
++table MwcbStatus {
++  stock_locate: ushort; // Placeholder
++  timestamp: Timestamp;
++  breached_level: uint8; // '1', '2', '3'
++}
++
++table IpoQuotingPeriodUpdate {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  stock_symbol: string;
++  ipo_quotation_release_time: uint; // Seconds since midnight
++  ipo_quotation_release_qualifier: uint8; // 'A' Anticipated, 'C' Canceled/Postponed
++  ipo_price: Price;
++}
++
++table NetOrderImbalance {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  paired_shares: ulong;
++  imbalance_shares: ulong;
++  imbalance_direction: uint8; // 'B' Buy, 'S' Sell, 'N' No imbalance, 'O' Insufficient orders
++  stock_symbol: string;
++  far_price: Price;
++  near_price: Price;
++  current_ref_price: Price;
++  cross_type: uint8; // 'O' Opening, 'C' Closing, 'H' Halt, 'I' Intraday
++  price_variation_indicator: uint8; // Space, 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
++}
++
++table RetailPriceImprovement {
++  stock_locate: ushort;
++  timestamp: Timestamp;
++  stock_symbol: string;
++  interest_flag: uint8; // 'B' Buy, 'S' Sell, 'A' Both, 'N' None
++}
++
++// Flatbuffers requires a root type
++// You could use a union to represent any possible ITCH message
++union ItchMessage {
++  SystemEvent, StockDirectory, TradingAction, RegShoRestriction,
++  MarketParticipantPosition, MwcbDeclineLevel, MwcbStatus,
++  IpoQuotingPeriodUpdate, AddOrder, AddOrderMpid, ExecuteOrder,
++  ExecuteOrderWithPrice, ReduceOrder, DeleteOrder, ReplaceOrder,
++  Trade, CrossTrade, BrokenTrade, NetOrderImbalance,
++  RetailPriceImprovement
++  // Add LULD_AUCTION_COLLAR if defined ('J')
++}
++
++table MessageContainer {
++  message: ItchMessage;
++}
++
++root_type MessageContainer;

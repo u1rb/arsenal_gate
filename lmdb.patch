@@ -1,0 +1,909 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..4a26e71
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,78 @@
++cmake_minimum_required(VERSION 3.10)
++project(rocksdb_blob_example C CXX)
++
++set(CMAKE_C_STANDARD 11)
++set(CMAKE_C_STANDARD_REQUIRED True)
++
++# Add option to force compile RocksDB from source
++option(FORCE_COMPILE_ROCKSDB "Force compilation of RocksDB from source" OFF)
++
++# First try to find system-installed RocksDB if not forcing compilation
++if(NOT FORCE_COMPILE_ROCKSDB)
++    find_package(RocksDB QUIET)
++else()
++    set(RocksDB_FOUND FALSE)
++    message(STATUS "Forcing compilation of RocksDB from source as requested")
++endif()
++
++if(NOT RocksDB_FOUND)
++    message(STATUS "System RocksDB not found, downloading and building from source")
++    # Set RocksDB options before including it
++    set(WITH_GFLAGS OFF CACHE BOOL "build with gflags")
++    set(WITH_TESTS OFF CACHE BOOL "build with tests")
++    set(WITH_TOOLS OFF CACHE BOOL "build with tools")
++    set(WITH_SNAPPY ON CACHE BOOL "build with snappy")
++
++    include(FetchContent)
++    FetchContent_Declare(
++        rocksdb
++        URL https://github.com/facebook/rocksdb/archive/refs/tags/v10.0.1.zip
++        URL_HASH SHA1=59334fa9c4194149b18b5eb6faba37fb04d431e8
++        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
++        CMAKE_ARGS 
++            -DCMAKE_BUILD_TYPE=Release
++    )
++
++    FetchContent_MakeAvailable(rocksdb)
++    # Don't use find_package after FetchContent_MakeAvailable
++    # The target 'rocksdb' is already available
++    
++    # Set variable to indicate we're using built rocksdb
++    set(USING_BUILT_ROCKSDB TRUE)
++else()
++    message(STATUS "Using system-installed RocksDB")
++    set(USING_BUILT_ROCKSDB FALSE)
++endif()
++
++# Try to find system-installed LMDB
++find_package(LMDB REQUIRED)
++if(LMDB_FOUND)
++    message(STATUS "Found LMDB: ${LMDB_LIBRARIES}")
++else()
++    message(FATAL_ERROR "LMDB library not found. Please install lmdb-dev (or equivalent).")
++endif()
++
++# Add the executables
++add_executable(rocksdb_writer main.cpp)
++add_executable(rocksdb_reader reader.cpp)
++add_executable(lmdb_writer lmdb_writer.cpp)
++
++# Link against the RocksDB library and include directories
++if(USING_BUILT_ROCKSDB)
++    target_link_libraries(rocksdb_writer PRIVATE rocksdb)
++    target_link_libraries(rocksdb_reader PRIVATE rocksdb)
++else()
++    target_link_libraries(rocksdb_writer PRIVATE RocksDB::rocksdb)
++    target_link_libraries(rocksdb_reader PRIVATE RocksDB::rocksdb)
++endif()
++
++# Link LMDB executable
++target_link_libraries(lmdb_writer PRIVATE ${LMDB_LIBRARIES})
++
++add_executable(file_stream_writer file_stream_writer.cpp)
++
++# Optional: Add compiler flags if needed, e.g., for optimization
++# target_compile_options(rocksdb_writer PRIVATE -O3)
++# target_compile_options(rocksdb_reader PRIVATE -O3)
++
++message(STATUS "RocksDB configuration complete")
+\ No newline at end of file
+diff --git a/a.py b/a.py
+new file mode 100644
+index 0000000..ec440ad
+--- /dev/null
++++ b/a.py
+@@ -0,0 +1,40 @@
++from rocksdict import Rdict
++import numpy as np
++import pandas as pd
++
++path = str("./test_dict")
++
++# create a Rdict with default options at `path`
++db = Rdict(path)
++db[1.0] = 1
++db["huge integer"] = 2343546543243564534233536434567543
++db["good"] = True
++db["bytes"] = b"bytes"
++db["this is a list"] = [1, 2, 3]
++db["store a dict"] = {0: 1}
++db[b"numpy"] = np.array([1, 2, 3])
++db["a table"] = pd.DataFrame({"a": [1, 2], "b": [2, 1]})
++
++# reopen Rdict from disk
++db.close()
++db = Rdict(path)
++assert db[1.0] == 1
++assert db["huge integer"] == 2343546543243564534233536434567543
++assert db["good"] == True
++assert db["bytes"] == b"bytes"
++assert db["this is a list"] == [1, 2, 3]
++assert db["store a dict"] == {0: 1}
++assert np.all(db[b"numpy"] == np.array([1, 2, 3]))
++assert np.all(db["a table"] == pd.DataFrame({"a": [1, 2], "b": [2, 1]}))
++
++# iterate through all elements
++for k, v in db.items():
++    print(f"{k} -> {v}")
++
++# batch get:
++print(db[["good", "bad", 1.0]])
++# [True, False, 1]
++
++# delete Rdict from dict
++db.close()
++Rdict.destroy(path)
+diff --git a/a.sh b/a.sh
+new file mode 100755
+index 0000000..cf65d0c
+--- /dev/null
++++ b/a.sh
+@@ -0,0 +1,45 @@
++#!/bin/bash
++set -ueo pipefail
++
++# rm -rf build
++# Create build directory
++mkdir -p build
++
++# Configure with forced RocksDB compilation
++echo "Configuring build with FORCE_COMPILE_ROCKSDB=ON..."
++
++cmake -S. -B build \
++  -G Ninja -DCMAKE_MODULE_PATH=cmake/modules \
++  -DCMAKE_BUILD_TYPE=Release \
++  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
++
++# Build the project
++echo "Building project..."
++cmake --build build
++
++echo "Build completed successfully!"
++
++# Check if executables were created
++if [ -f "build/rocksdb_writer" ] && [ -f "build/rocksdb_reader" ]; then
++  echo "✅ Success: Both executables were created"
++else
++  echo "❌ Error: Executables were not created"
++  exit 1
++fi
++
++rm -rf /tmp/rocksdb_blob_example
++rm -rf /tmp/lmdb_blob_example
++
++# time ./build/rocksdb_writer
++
++# ./build/rocksdb_reader 5000 100
++rm -rf build/lmdb_blob_example*
++rm -rf build/file_blob_example.dat
++
++sleep 10
++
++time ./build/lmdb_writer ./build/lmdb_blob_example_1
++
++sleep 10
++
++time ./build/file_stream_writer
+diff --git a/cmake/modules/FindLMDB.cmake b/cmake/modules/FindLMDB.cmake
+new file mode 100644
+index 0000000..4e140c6
+--- /dev/null
++++ b/cmake/modules/FindLMDB.cmake
+@@ -0,0 +1,50 @@
++# Find LMDB or download it using FetchContent
++#  LMDB_FOUND - system has LMDB lib
++#  LMDB_INCLUDE_DIR - the LMDB include directory
++#  LMDB_LIBRARIES - Libraries needed to use LMDB
++
++# Copyright 2023, RocksDB developers
++
++include(FetchContent)
++
++set(LMDB_REPOSITORY "https://github.com/LMDB/lmdb.git" CACHE STRING "LMDB repository URL")
++set(LMDB_TAG "LMDB_0.9.31" CACHE STRING "LMDB git tag to use")
++
++message(STATUS "Downloading LMDB from ${LMDB_REPOSITORY}, tag ${LMDB_TAG}")
++
++FetchContent_Declare(
++  lmdb
++  URL https://github.com/LMDB/lmdb/archive/refs/tags/LMDB_0.9.31.zip
++  URL_HASH SHA1=ec1948aab5fd14f34ff142f876d5921dc95c83cc
++  DOWNLOAD_EXTRACT_TIMESTAMP 1
++)
++
++FetchContent_GetProperties(lmdb)
++if(NOT lmdb_POPULATED)
++  FetchContent_Populate(lmdb)
++  
++  # LMDB's source code is in the 'libraries/liblmdb' directory
++  set(LMDB_SOURCE_DIR "${lmdb_SOURCE_DIR}/libraries/liblmdb")
++  
++  # Set include directory
++  set(LMDB_INCLUDE_DIR "${LMDB_SOURCE_DIR}")
++  
++  # Build LMDB - only include mdb.c and midl.c, not test files
++  set(LMDB_SOURCES "${LMDB_SOURCE_DIR}/mdb.c" "${LMDB_SOURCE_DIR}/midl.c")
++  add_library(lmdb STATIC ${LMDB_SOURCES})
++  target_include_directories(lmdb INTERFACE ${LMDB_SOURCE_DIR})
++  set_target_properties(lmdb PROPERTIES POSITION_INDEPENDENT_CODE ON)
++  
++  # Set the library
++  set(LMDB_LIBRARIES lmdb)
++  
++  # Export version information
++  set(LMDB_VERSION "0.9.31")  # Use the version from the tag
++endif()
++
++# Set LMDB_INCLUDE_DIRS for backward compatibility
++set(LMDB_INCLUDE_DIRS ${LMDB_INCLUDE_DIR})
++
++set(LMDB_FOUND TRUE)
++message(STATUS "Using FetchContent LMDB (include: ${LMDB_INCLUDE_DIR}, library: ${LMDB_LIBRARIES})")
++mark_as_advanced(LMDB_INCLUDE_DIR LMDB_LIBRARIES LMDB_INCLUDE_DIRS)
+\ No newline at end of file
+diff --git a/file_stream_writer.cpp b/file_stream_writer.cpp
+new file mode 100644
+index 0000000..cfe1d98
+--- /dev/null
++++ b/file_stream_writer.cpp
+@@ -0,0 +1,148 @@
++#include <fcntl.h> // For open, O_* constants
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h> // For mkdir
++#include <sys/time.h> // For timing
++#include <time.h>     // For seeding random
++#include <unistd.h>   // For write, close
++
++// --- Configuration ---
++const char *FILE_PATH = "build/file_blob_example.dat";
++const int NUM_KEYS_TO_WRITE =
++    2 * 1000 * 1000;                        // Number of blob entries to write
++const size_t BLOB_SIZE = 1 * 1024;          // 1 KB blobs
++const int BATCH_SIZE = 2048 * 16;           // Write in batches
++const size_t BUFFER_SIZE = 8 * 1024 * 1024; // 8 MB write buffer
++
++// --- End Configuration ---
++
++// Helper function to check errors
++void check_error(int rc, const char *message) {
++  if (rc < 0) {
++    perror(message);
++    exit(1);
++  }
++}
++
++int main() {
++  int fd;
++  int rc;
++  char key_buffer[64];
++  char *value_buffer = NULL;
++  char *write_buffer = NULL;
++  size_t write_buffer_pos = 0;
++  struct timeval start_time, end_time;
++  double elapsed;
++
++  printf("Starting File Stream Write Example...\n");
++  printf("Output file: %s\n", FILE_PATH);
++  printf("Writing %d keys with blob size %zu bytes.\n", NUM_KEYS_TO_WRITE,
++         BLOB_SIZE);
++  printf("Batch size: %d\n", BATCH_SIZE);
++  printf("Buffer size: %zu bytes\n", BUFFER_SIZE);
++
++  // --- Create directory if it doesn't exist ---
++  struct stat st = {0};
++  const char *dir_path = "build";
++  if (stat(dir_path, &st) == -1) {
++    if (mkdir(dir_path, 0700) != 0) {
++      perror("Failed to create directory");
++      exit(1);
++    }
++    printf("Created directory: %s\n", dir_path);
++  }
++
++  // --- Open output file ---
++  printf("Opening output file...\n");
++  fd = open(FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++  if (fd < 0) {
++    perror("Failed to open output file");
++    exit(1);
++  }
++
++  // --- Allocate buffers ---
++  value_buffer = (char *)malloc(BLOB_SIZE);
++  if (!value_buffer) {
++    fprintf(stderr, "Failed to allocate memory for value buffer\n");
++    exit(1);
++  }
++
++  write_buffer = (char *)malloc(BUFFER_SIZE);
++  if (!write_buffer) {
++    fprintf(stderr, "Failed to allocate memory for write buffer\n");
++    free(value_buffer);
++    exit(1);
++  }
++
++  // Fill value buffer with some arbitrary data (e.g., pseudo-random bytes)
++  srand(time(NULL));
++  for (size_t i = 0; i < BLOB_SIZE; ++i) {
++    value_buffer[i] = rand() % 256;
++  }
++
++  // --- Write Data ---
++  printf("Writing data...\n");
++  gettimeofday(&start_time, NULL);
++
++  for (size_t i = 0; i < NUM_KEYS_TO_WRITE; ++i) {
++    // Generate key
++    snprintf(key_buffer, sizeof(key_buffer), "key%08ld", i);
++    size_t key_size = strlen(key_buffer);
++
++    // Check if buffer needs to be flushed
++    if (write_buffer_pos + sizeof(key_size) + key_size + sizeof(BLOB_SIZE) +
++            BLOB_SIZE >
++        BUFFER_SIZE) {
++      rc = write(fd, write_buffer, write_buffer_pos);
++      check_error(rc, "write failed");
++      write_buffer_pos = 0;
++
++      if (i % BATCH_SIZE == 0) {
++        printf("Wrote %ld keys...\n", i);
++      }
++    }
++
++    // Write key size
++    memcpy(write_buffer + write_buffer_pos, &key_size, sizeof(key_size));
++    write_buffer_pos += sizeof(key_size);
++
++    // Write key data
++    memcpy(write_buffer + write_buffer_pos, key_buffer, key_size);
++    write_buffer_pos += key_size;
++
++    // Write blob size
++    memcpy(write_buffer + write_buffer_pos, &BLOB_SIZE, sizeof(BLOB_SIZE));
++    write_buffer_pos += sizeof(BLOB_SIZE);
++
++    // Write blob data
++    memcpy(write_buffer + write_buffer_pos, value_buffer, BLOB_SIZE);
++    write_buffer_pos += BLOB_SIZE;
++  }
++
++  // Flush any remaining data
++  if (write_buffer_pos > 0) {
++    rc = write(fd, write_buffer, write_buffer_pos);
++    check_error(rc, "final write failed");
++  }
++
++  // Sync data to disk
++  fsync(fd);
++
++  gettimeofday(&end_time, NULL);
++  elapsed = (end_time.tv_sec - start_time.tv_sec) +
++            (end_time.tv_usec - start_time.tv_usec) / 1000000.0;
++
++  printf("Finished writing data in %.2f seconds\n", elapsed);
++  printf("Write throughput: %.2f MB/s\n",
++         (NUM_KEYS_TO_WRITE * (BLOB_SIZE + 16)) / (elapsed * 1024 * 1024));
++
++  // --- Cleanup ---
++  printf("Cleaning up resources...\n");
++  free(value_buffer);
++  free(write_buffer);
++  close(fd);
++
++  printf("Done.\n");
++  return 0;
++}
+\ No newline at end of file
+diff --git a/lmdb_writer.cpp b/lmdb_writer.cpp
+new file mode 100644
+index 0000000..167d628
+--- /dev/null
++++ b/lmdb_writer.cpp
+@@ -0,0 +1,200 @@
++#include <lmdb.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h> // For mkdir
++#include <sys/time.h> // For timing
++#include <time.h>     // For seeding random
++
++// --- Configuration ---
++const int NUM_KEYS_TO_WRITE =
++    2 * 1000 * 1000;               // Number of blob entries to write
++const size_t BLOB_SIZE = 1 * 1024; // 1 KB blobs
++const int BATCH_SIZE = 2048 * 16;  // Write in batches
++// LMDB specific: Define max DB size (adjust as needed)
++// Rough estimate: NUM_KEYS * (Avg Key Size + BLOB_SIZE) + overhead
++// 10000 * (12 + 1024) = ~10MB. Let's use 100MB to be safe.
++const size_t MAP_SIZE = 10ULL * 1024 * 1024 * 1024; // 2 GiB
++// LMDB Flags for performance (trade-off safety)
++// MDB_NOSYNC: Don't fsync after commit - faster, less durable
++// MDB_MAPASYNC: Use asynchronous msync - faster, less durable
++// MDB_WRITEMAP: Use writeable memory map - faster
++// MDB_NOMETASYNC: Don't fsync metadata - faster, less durable
++const unsigned int ENV_FLAGS =
++    MDB_NOSYNC | MDB_MAPASYNC | MDB_NOMETASYNC | MDB_WRITEMAP;
++
++// --- End Configuration ---
++
++// Helper function to check LMDB errors
++void check_lmdb_error(int rc, const char *message) {
++  if (rc != MDB_SUCCESS) {
++    fprintf(stderr, "Error: %s: %s ", message, mdb_strerror(rc));
++    exit(1);
++  }
++}
++
++int main(int argc, char **argv) {
++
++  const char *DB_PATH_DEFAULT = "build/lmdb_blob_example";
++  char DB_PATH[1024];
++  if (argc > 1) {
++    strncpy(DB_PATH, argv[1], sizeof(DB_PATH));
++  } else {
++    strncpy(DB_PATH, DB_PATH_DEFAULT, sizeof(DB_PATH));
++  }
++
++  MDB_env *env;
++  MDB_dbi dbi;
++  MDB_txn *txn;
++  MDB_val key_val, data_val;
++  int rc;
++  char key_buffer[64];
++  char *value_buffer = NULL;
++  struct timeval start_time, end_time;
++  double elapsed;
++
++  printf("Starting LMDB Write Example...  ");
++  printf("Database path: %s ", DB_PATH);
++  printf("Writing %d keys with blob size %zu bytes.  ", NUM_KEYS_TO_WRITE,
++         BLOB_SIZE);
++  printf("Batch size: %d ", BATCH_SIZE);
++  printf("LMDB Map Size: %zu bytes ", MAP_SIZE);
++  printf("LMDB Env Flags: 0x%X (MDB_WRITEMAP | MDB_NOSYNC | MDB_MAPASYNC | "
++         "MDB_NOMETASYNC) ",
++         ENV_FLAGS);
++
++  // --- Create DB Directory if it doesn't exist ---
++  // LMDB doesn't create the directory automatically
++  struct stat st = {0};
++  if (stat(DB_PATH, &st) == -1) {
++    if (mkdir(DB_PATH, 0700) != 0) {
++      perror("Failed to create database directory");
++      exit(1);
++    }
++    printf("Created database directory: %s ", DB_PATH);
++  }
++
++  // --- Prepare LMDB Environment ---
++  rc = mdb_env_create(&env);
++  check_lmdb_error(rc, "mdb_env_create failed");
++
++  // Set the max database size
++  rc = mdb_env_set_mapsize(env, MAP_SIZE);
++  check_lmdb_error(rc, "mdb_env_set_mapsize failed");
++
++  // Set max databases (only need 1 here)
++  rc = mdb_env_set_maxdbs(env, 1);
++  check_lmdb_error(rc, "mdb_env_set_maxdbs failed");
++
++  // --- Open LMDB Environment ---
++  printf("Opening LMDB environment...  ");
++  // Flags: MDB_WRITEMAP for potential speedup, MDB_NOSYNC/MAPASYNC for less
++  // durability/more speed
++  rc = mdb_env_open(env, DB_PATH, ENV_FLAGS, 0664);
++  check_lmdb_error(rc, "mdb_env_open failed");
++
++  // --- Allocate reusable buffer for blob data ---
++  value_buffer = (char *)malloc(BLOB_SIZE);
++  if (!value_buffer) {
++    fprintf(stderr, "Failed to allocate memory for value buffer ");
++    exit(1);
++  }
++  // Fill with some arbitrary data (e.g., pseudo-random bytes)
++  srand(time(NULL));
++  for (size_t i = 0; i < BLOB_SIZE; ++i) {
++    value_buffer[i] = rand() % 256;
++  }
++
++  // --- Write Data in Batches using Transactions ---
++  printf("Writing data...  ");
++  int keys_in_batch = 0;
++  txn = NULL; // Initialize transaction pointer
++
++  gettimeofday(&start_time, NULL);
++
++  for (size_t i = 0; i < NUM_KEYS_TO_WRITE; ++i) {
++    // Start a new transaction every BATCH_SIZE iterations or on the first key
++    if (keys_in_batch == 0) {
++      if (txn != NULL) { // Commit previous transaction if it exists
++        rc = mdb_txn_commit(txn);
++        check_lmdb_error(rc, "mdb_txn_commit failed");
++        txn = NULL; // Reset transaction pointer
++        // printf("Committed batch.  \n");
++      }
++      // Begin a new write transaction
++      rc = mdb_txn_begin(env, NULL, 0, &txn); // Use 0 flags for write txn
++      check_lmdb_error(rc, "mdb_txn_begin failed");
++
++      // Open the database (DBI) within the transaction.
++      // Needs to be done once per transaction usually, but safe to do
++      // repeatedly. Use MDB_CREATE to create the DB if it doesn't exist.
++      rc = mdb_dbi_open(txn, NULL, MDB_CREATE, &dbi); // NULL for main DB
++      check_lmdb_error(rc, "mdb_dbi_open failed");
++
++      if (i + BATCH_SIZE > NUM_KEYS_TO_WRITE) {
++        // printf("Writing final batch (%ld keys)...  \n", NUM_KEYS_TO_WRITE -
++        // i);
++      } else {
++        // printf("Starting batch at key %ld...  \n", i);
++      }
++    }
++
++    // Generate key
++
++    snprintf(key_buffer, sizeof(key_buffer), "key%08ld", i);
++    key_val.mv_size = strlen(key_buffer);
++
++    key_val.mv_data = key_buffer;
++
++    // Set data value (using the pre-filled buffer)
++    data_val.mv_size = BLOB_SIZE;
++    data_val.mv_data = value_buffer;
++
++    // Add Put operation to the current transaction
++    // Use MDB_APPEND flag because keys are sorted lexicographically.
++    // This significantly speeds up insertions.
++    rc = mdb_put(txn, dbi, &key_val, &data_val, MDB_APPEND);
++
++    // Handle specific errors like MDB_MAP_FULL if necessary
++    if (rc == MDB_MAP_FULL) {
++      fprintf(stderr, "Error: LMDB Map Full. Increase MAP_SIZE.  ");
++      mdb_txn_abort(txn); // Abort the current transaction
++      exit(1);
++    }
++    check_lmdb_error(rc, "mdb_put failed");
++
++    keys_in_batch++;
++
++    // Commit batch if BATCH_SIZE is reached
++    if (keys_in_batch >= BATCH_SIZE) {
++      keys_in_batch = 0; // Reset counter for next batch trigger
++      // The commit will happen at the start of the next loop iteration
++    }
++  }
++
++  // Commit the last remaining transaction
++  if (txn != NULL) {
++    rc = mdb_txn_commit(txn);
++    check_lmdb_error(rc, "Final mdb_txn_commit failed");
++    txn = NULL;
++    // printf("Committed final batch.  ");
++  }
++
++  gettimeofday(&end_time, NULL);
++  elapsed = (end_time.tv_sec - start_time.tv_sec) +
++            (end_time.tv_usec - start_time.tv_usec) / 1000000.0;
++
++  printf("Finished writing data in %.2f seconds\n", elapsed);
++  printf("Write throughput: %.2f MB/s\n",
++         (NUM_KEYS_TO_WRITE * (BLOB_SIZE + 16)) / (elapsed * 1024 * 1024));
++
++  // --- Cleanup ---
++  printf("Cleaning up resources...  ");
++  free(value_buffer);
++  // DBI handle is closed automatically when transaction commits/aborts or env
++  // closes No need to explicitly call mdb_dbi_close unless using MDB_NOMETASYNC
++  mdb_env_close(env);
++
++  printf("Done.  ");
++  return 0;
++}
+\ No newline at end of file
+diff --git a/main.cpp b/main.cpp
+new file mode 100644
+index 0000000..812610c
+--- /dev/null
++++ b/main.cpp
+@@ -0,0 +1,158 @@
++#include <rocksdb/c.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h> // For seeding random
++
++// --- Configuration ---
++const char *DB_PATH = "/tmp/rocksdb_blob_example";
++const int NUM_KEYS_TO_WRITE = 4 * 1000 * 1000; // Number of blob entries to write
++// const size_t BLOB_SIZE = 128 * 1024; // 128 KB blobs
++const size_t BLOB_SIZE = 1 * 1024; // 1 KB blobs
++const int BATCH_SIZE = 8192 * 4;   // Write in batches of 100
++const int DISABLE_WAL = 1; // 1 to disable WAL (faster, less safe), 0 to enable
++const size_t MIN_BLOB_SIZE = 16 * 1024; // Values >= 16KB go to blob files
++// --- End Configuration ---
++
++// Helper function to check RocksDB errors
++void check_rocksdb_error(char *errptr, const char *message) {
++  if (errptr != NULL) {
++    fprintf(stderr, "Error: %s: %s\n", message, errptr);
++    free(errptr); // Important: Free the error message memory
++    exit(1);
++  }
++}
++
++int main() {
++  rocksdb_t *db;
++  rocksdb_options_t *options;
++  rocksdb_writeoptions_t *write_options;
++  char *err = NULL;
++  char key_buffer[64];
++  char *value_buffer = NULL;
++
++  printf("Starting RocksDB Blob Write Example...\n");
++  printf("Database path: %s\n", DB_PATH);
++  printf("Writing %d keys with blob size %zu bytes.\n", NUM_KEYS_TO_WRITE,
++         BLOB_SIZE);
++  printf("Batch size: %d\n", BATCH_SIZE);
++  printf("Min blob size for BlobDB: %zu bytes\n", MIN_BLOB_SIZE);
++  printf("Write Ahead Log (WAL): %s\n",
++         DISABLE_WAL ? "DISABLED (Max Speed / Less Safe!)" : "ENABLED (Safer)");
++
++  // --- Prepare RocksDB Options ---
++  options = rocksdb_options_create();
++  // Increase parallelism (adjust based on your CPU cores)
++  rocksdb_options_increase_parallelism(options, 4);
++  // Optimize level 0 file num compaction trigger (can help with write stalls)
++  rocksdb_options_optimize_level_style_compaction(
++      options, 512 * 1024 * 1024); // 512MB memory budget
++  // Create DB if it doesn't exist
++  rocksdb_options_set_create_if_missing(options, 1);
++
++  // Tune memtable/write buffer size (larger buffer can absorb write bursts)
++  rocksdb_options_set_write_buffer_size(options,
++                                        128 * 1024 * 1024); // 128MB memtable
++  rocksdb_options_set_max_write_buffer_number(
++      options, 4); // Allow more memtables in memory
++
++  // Disable compression for potential raw speed gain (if CPU bound or data
++  // incompressible)
++  rocksdb_options_set_compression(options, rocksdb_no_compression);
++
++  // --- Enable and Configure BlobDB ---
++  rocksdb_options_set_enable_blob_files(options, 1);
++  rocksdb_options_set_min_blob_size(options, MIN_BLOB_SIZE);
++  // Optional: Set blob file size, compression for blobs, enable GC etc.
++  // rocksdb_options_set_blob_file_size(options, 256 * 1024 * 1024); // 256MB
++  // blob files rocksdb_options_set_blob_compression_type(options,
++  // rocksdb_lz4_compression);
++  // rocksdb_options_set_enable_blob_garbage_collection(options, 1);
++
++  // --- Prepare Write Options ---
++  write_options = rocksdb_writeoptions_create();
++  if (DISABLE_WAL) {
++    // Disabling WAL significantly increases write speed but risks data loss on
++    // crash
++    rocksdb_writeoptions_disable_WAL(write_options, 1);
++    // Optional: Sync writes aren't needed if WAL is off
++    // rocksdb_writeoptions_set_sync(write_options, 0);
++  } else {
++    // Optional: If WAL is enabled, you might consider disabling sync for speed,
++    // but this still risks losing data in the OS buffer cache on power loss.
++    // rocksdb_writeoptions_set_sync(write_options, 0);
++  }
++
++  // --- Open DB ---
++  printf("Opening database...\n");
++  db = rocksdb_open(options, DB_PATH, &err);
++  check_rocksdb_error(err, "DB Open failed");
++  err = NULL; // Reset error pointer
++
++  // --- Allocate reusable buffer for blob data ---
++  value_buffer = (char *)malloc(BLOB_SIZE);
++  if (!value_buffer) {
++    fprintf(stderr, "Failed to allocate memory for value buffer\n");
++    exit(1);
++  }
++  // Fill with some arbitrary data (e.g., pseudo-random bytes)
++  srand(time(NULL));
++  for (size_t i = 0; i < BLOB_SIZE; ++i) {
++    value_buffer[i] = rand() % 256;
++  }
++
++  // --- Write Data in Batches ---
++  printf("Writing data...\n");
++  rocksdb_writebatch_t *batch = NULL;
++  for (size_t i = 0; i < NUM_KEYS_TO_WRITE; ++i) {
++    // Create a new batch every BATCH_SIZE iterations
++    if (i % BATCH_SIZE == 0) {
++      // Write the previous batch if it exists
++      if (batch != NULL) {
++        rocksdb_write(db, write_options, batch, &err);
++        check_rocksdb_error(err, "Write batch failed");
++        err = NULL;
++        rocksdb_writebatch_destroy(batch); // Destroy the old batch
++      }
++      // Create a new batch
++      batch = rocksdb_writebatch_create();
++      if (i + BATCH_SIZE > NUM_KEYS_TO_WRITE) {
++        printf("Writing final batch (%ld keys)...\n", NUM_KEYS_TO_WRITE - i);
++      } else {
++        printf("Writing batch starting at key %ld...\n", i);
++      }
++    }
++
++    // Generate key, i is uint64_t
++    snprintf(key_buffer, sizeof(key_buffer), "key%08ld", i);
++
++    // Add Put operation to the current batch
++    // Using value_buffer directly. For varying data, fill it here.
++    if (1) {
++      rocksdb_writebatch_put(batch, key_buffer, sizeof(size_t), value_buffer,
++                             BLOB_SIZE);
++    }
++  }
++
++  // Write the last remaining batch
++  if (batch != NULL) {
++    rocksdb_write(db, write_options, batch, &err);
++    check_rocksdb_error(err, "Final write batch failed");
++    err = NULL;
++    rocksdb_writebatch_destroy(batch);
++    batch = NULL;
++  }
++
++  printf("Finished writing data.\n");
++
++  // --- Cleanup ---
++  printf("Cleaning up resources...\n");
++  free(value_buffer);
++  rocksdb_writeoptions_destroy(write_options);
++  rocksdb_options_destroy(options);
++  rocksdb_close(db);
++
++  printf("Done.\n");
++  return 0;
++}
+\ No newline at end of file
+diff --git a/read_lmdb.py b/read_lmdb.py
+new file mode 100644
+index 0000000..092a077
+--- /dev/null
++++ b/read_lmdb.py
+@@ -0,0 +1,14 @@
++import lmdb
++
++env = lmdb.open('build/lmdb_blob_example')
++
++with env.begin(write=False) as txn:
++    v = txn.get('key00000000'.encode('utf-8'))
++    print(f"{len(v)} len of bytes")
++
++# count number of keys
++with env.begin(write=False) as txn:
++    count = 0
++    for key, value in txn.cursor():
++        count += 1
++    print(count)
+diff --git a/reader.cpp b/reader.cpp
+new file mode 100644
+index 0000000..e7dc11f
+--- /dev/null
++++ b/reader.cpp
+@@ -0,0 +1,78 @@
++#include <rocksdb/c.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++// Configuration - must match the writer
++const char *DB_PATH = "/tmp/rocksdb_blob_example";
++
++// Helper function to check RocksDB errors
++void check_rocksdb_error(char *errptr, const char *message) {
++  if (errptr != NULL) {
++    fprintf(stderr, "Error: %s: %s\n", message, errptr);
++    free(errptr);
++    exit(1);
++  }
++}
++
++int main(int argc, char *argv[]) {
++  rocksdb_t *db;
++  rocksdb_options_t *options;
++  rocksdb_readoptions_t *read_options;
++  char *err = NULL;
++  char key_buffer[64];
++  
++  int start_key = 0;
++  int num_keys = 10;
++  
++  // Parse command line arguments if provided
++  if (argc > 1) start_key = atoi(argv[1]);
++  if (argc > 2) num_keys = atoi(argv[2]);
++  
++  printf("Reading from RocksDB at %s\n", DB_PATH);
++  printf("Starting at key %d, reading %d keys\n", start_key, num_keys);
++
++  // Create options
++  options = rocksdb_options_create();
++  read_options = rocksdb_readoptions_create();
++  
++  // Open the database
++  db = rocksdb_open(options, DB_PATH, &err);
++  check_rocksdb_error(err, "DB Open failed");
++  
++  // Read and print keys
++  for (int i = start_key; i < start_key + num_keys; i++) {
++    size_t val_len;
++    
++    // Format key the same way as in the writer
++    snprintf(key_buffer, sizeof(key_buffer), "key%08d", i);
++    
++    // Read the value
++    char *value = rocksdb_get(db, read_options, key_buffer, strlen(key_buffer), &val_len, &err);
++    check_rocksdb_error(err, "Read failed");
++    
++    if (value != NULL) {
++      printf("Key: %s, Value size: %zu bytes\n", key_buffer, val_len);
++      
++      // Print first few bytes as hex
++      printf("Value preview (first 16 bytes): ");
++      for (size_t j = 0; j < val_len && j < 16; j++) {
++        printf("%02x ", (unsigned char)value[j]);
++      }
++      printf("\n");
++      
++      // Free the value returned by RocksDB
++      free(value);
++    } else {
++      printf("Key %s not found\n", key_buffer);
++    }
++  }
++  
++  // Cleanup
++  rocksdb_readoptions_destroy(read_options);
++  rocksdb_options_destroy(options);
++  rocksdb_close(db);
++  
++  printf("Done.\n");
++  return 0;
++} 
+\ No newline at end of file
+diff --git a/reader.py b/reader.py
+new file mode 100644
+index 0000000..1e64212
+--- /dev/null
++++ b/reader.py
+@@ -0,0 +1,32 @@
++from rocksdict import Rdict, Options
++
++db_path = "/tmp/rocksdb_blob_example"
++db = Rdict(db_path, options=Options(raw_mode=True))
++
++# list column families
++cfs = Rdict.list_cf(db_path)
++print(cfs)
++
++# use one of the column families
++cf1 = db.get_column_family(cfs[0])
++
++# iterate through all key-value pairs in cf1
++print("key-value pairs")
++n = 10
++for k, v in cf1.items():
++    n -= 1
++    x = len(v)
++    print(f"{k} -> {x} bytes")
++    if n == 0:
++        break
++
++print("wide columns")
++
++# iterate through all wide columns in cf1
++n = 10
++for k, v in cf1.entities():
++    n -= 1
++    x = len(v[0][1])
++    print(f"{k} -> {x} bytes")
++    if n == 0:
++        break

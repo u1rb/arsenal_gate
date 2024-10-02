@@ -1,0 +1,2517 @@
+From cc2e5ae4e8f4e68233657bec714ea5a1a2321f0c Mon Sep 17 00:00:00 2001
+From: Patch Creator <patch@example.com>
+Date: Thu, 27 Mar 2025 12:56:24 +0800
+Subject: [PATCH] Patch commit
+
+---
+ CMakeLists.txt                |  45 ++
+ a.sh                          |  19 +
+ src/shm_ipc.c                 | 764 ++++++++++++++++++++++++++++++++++
+ src/shm_ipc.h                 | 149 +++++++
+ src/shm_ipc_wrapper.cpp       | 274 ++++++++++++
+ src/shm_ipc_wrapper.h         | 196 +++++++++
+ tests/test_multi_consumer.cpp | 353 ++++++++++++++++
+ tests/test_shm_ipc.cpp        | 634 ++++++++++++++++++++++++++++
+ 8 files changed, 2434 insertions(+)
+ create mode 100644 CMakeLists.txt
+ create mode 100644 a.sh
+ create mode 100644 src/shm_ipc.c
+ create mode 100644 src/shm_ipc.h
+ create mode 100644 src/shm_ipc_wrapper.cpp
+ create mode 100644 src/shm_ipc_wrapper.h
+ create mode 100644 tests/test_multi_consumer.cpp
+ create mode 100644 tests/test_shm_ipc.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..0f55902
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,45 @@
++cmake_minimum_required(VERSION 3.14)
++project(shm_ipc_project VERSION 0.1.0 LANGUAGES CXX C)
++
++set(CMAKE_CXX_STANDARD 17)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++
++# Setup Catch2
++include(FetchContent)
++FetchContent_Declare(
++    catch2
++    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
++    GIT_TAG v2.13.7
++)
++FetchContent_MakeAvailable(catch2)
++
++# C IPC library implementation
++add_library(shm_ipc STATIC
++    src/shm_ipc.c
++    src/shm_ipc.h
++    src/shm_ipc_wrapper.cpp
++    src/shm_ipc_wrapper.h
++)
++
++target_include_directories(shm_ipc PUBLIC
++    ${CMAKE_CURRENT_SOURCE_DIR}/src
++)
++
++# Main test executable
++add_executable(test_shm_ipc tests/test_shm_ipc.cpp)
++target_link_libraries(test_shm_ipc
++    shm_ipc
++    Catch2::Catch2
++)
++
++# Multi-consumer test executable
++add_executable(test_multi_consumer tests/test_multi_consumer.cpp)
++target_link_libraries(test_multi_consumer
++    shm_ipc
++    Catch2::Catch2
++)
++
++# Add tests
++include(CTest)
++add_test(NAME test_shm_ipc COMMAND test_shm_ipc)
++add_test(NAME test_multi_consumer COMMAND test_multi_consumer) 
+\ No newline at end of file
+diff --git a/a.sh b/a.sh
+new file mode 100644
+index 0000000..0c0893a
+--- /dev/null
++++ b/a.sh
+@@ -0,0 +1,19 @@
++#!/bin/bash
++cd `dirname $0`
++
++set -ueo pipefail
++
++# Create necessary directories
++mkdir -p build src tests
++
++# Configure and build the project
++cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
++cmake --build build
++
++# Run tests
++echo "Running basic functionality tests..."
++build/test_shm_ipc
++
++echo ""
++echo "Running multi-consumer tests..."
++build/test_multi_consumer
+\ No newline at end of file
+diff --git a/src/shm_ipc.c b/src/shm_ipc.c
+new file mode 100644
+index 0000000..619602c
+--- /dev/null
++++ b/src/shm_ipc.c
+@@ -0,0 +1,764 @@
++#include "shm_ipc.h"
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <errno.h>
++#include <stdatomic.h>
++
++#define DEFAULT_BUFFER_SIZE (1024 * 1024) // 1MB
++#define MESSAGE_HEADER_SIZE sizeof(uint32_t) // Size of message length prefix
++
++/**
++ * Ring buffer structure for IPC communication
++ */
++struct RingBuffer {
++    size_t buffer_size;                              // Size of the data buffer
++    atomic_size_t* write_index;                      // Index where next write will occur
++    atomic_size_t* read_indices[SHM_IPC_MAX_CONSUMERS]; // Indices where next read will occur (one per consumer)
++    atomic_size_t* consumer_active;                  // Bitmap of active consumers
++    uint8_t* data;                                   // Pointer to the mapped data
++    void* mmap_addr;                                 // Base address of the mapped region
++    size_t mmap_size;                                // Total size of the mapped region
++    int fd;                                          // File descriptor for the shared memory
++    char* shm_name;                                  // Name of the shared memory segment
++    int consumer_id;                                 // ID of this consumer (-1 for producer)
++};
++
++/**
++ * Creates a new shared memory ring buffer
++ */
++RingBuffer* shm_ipc_create(const char* shm_name, size_t size) {
++    if (!shm_name) {
++        return NULL;
++    }
++
++    size_t actual_size = (size == 0) ? DEFAULT_BUFFER_SIZE : size;
++    
++    // Allocate ring buffer structure
++    RingBuffer* rb = (RingBuffer*)malloc(sizeof(RingBuffer));
++    if (!rb) {
++        return NULL;
++    }
++    
++    // Initialize the structure
++    memset(rb, 0, sizeof(RingBuffer));
++    rb->consumer_id = -1; // This is a producer
++    
++    // Store the shared memory name
++    rb->shm_name = strdup(shm_name);
++    if (!rb->shm_name) {
++        free(rb);
++        return NULL;
++    }
++
++    // Calculate total memory needs: 
++    // buffer size + 1 atomic size_t for write index + SHM_IPC_MAX_CONSUMERS for read indices
++    // + 1 for the active consumers bitmap
++    size_t header_size = sizeof(atomic_size_t) * (1 + SHM_IPC_MAX_CONSUMERS + 1);
++    rb->mmap_size = header_size + actual_size;
++    rb->buffer_size = actual_size;
++    
++    // Create and open shared memory object
++    char shm_path[256];
++    snprintf(shm_path, sizeof(shm_path), "/dev/shm/%s", shm_name);
++    
++    // Open or create shared memory file
++    rb->fd = open(shm_path, O_RDWR | O_CREAT, 0666);
++    if (rb->fd == -1) {
++        perror("open");
++        free(rb->shm_name);
++        free(rb);
++        return NULL;
++    }
++    
++    // Set the file size
++    if (ftruncate(rb->fd, rb->mmap_size) == -1) {
++        perror("ftruncate");
++        close(rb->fd);
++        free(rb->shm_name);
++        free(rb);
++        return NULL;
++    }
++    
++    // Memory map the shared object
++    rb->mmap_addr = mmap(NULL, rb->mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, rb->fd, 0);
++    if (rb->mmap_addr == MAP_FAILED) {
++        perror("mmap");
++        close(rb->fd);
++        free(rb->shm_name);
++        free(rb);
++        return NULL;
++    }
++    
++    // Setup memory layout:
++    // - First atomic_size_t: write index
++    // - Next SHM_IPC_MAX_CONSUMERS atomic_size_t: read indices
++    // - Next atomic_size_t: active consumer bitmap
++    // - Remaining: data buffer
++    rb->write_index = (atomic_size_t*)rb->mmap_addr;
++    for (int i = 0; i < SHM_IPC_MAX_CONSUMERS; i++) {
++        rb->read_indices[i] = (atomic_size_t*)((uint8_t*)rb->mmap_addr + sizeof(atomic_size_t) * (i + 1));
++    }
++    rb->consumer_active = (atomic_size_t*)((uint8_t*)rb->mmap_addr + sizeof(atomic_size_t) * (1 + SHM_IPC_MAX_CONSUMERS));
++    rb->data = (uint8_t*)rb->mmap_addr + header_size;
++    
++    // Initialize atomic counters
++    atomic_store(rb->write_index, 0);
++    
++    // Set all read indices to 0
++    for (int i = 0; i < SHM_IPC_MAX_CONSUMERS; i++) {
++        atomic_store(rb->read_indices[i], 0);
++    }
++    
++    // No consumers active yet
++    atomic_store(rb->consumer_active, 0);
++    
++    return rb;
++}
++
++/**
++ * Opens an existing shared memory ring buffer as a consumer
++ */
++RingBuffer* shm_ipc_open_consumer(const char* shm_name, int consumer_id) {
++    if (!shm_name || consumer_id < 0 || consumer_id >= SHM_IPC_MAX_CONSUMERS) {
++        return NULL;
++    }
++    
++    // Allocate ring buffer structure
++    RingBuffer* rb = (RingBuffer*)malloc(sizeof(RingBuffer));
++    if (!rb) {
++        return NULL;
++    }
++    
++    // Initialize the structure
++    memset(rb, 0, sizeof(RingBuffer));
++    rb->consumer_id = consumer_id;
++    
++    // Store the shared memory name
++    rb->shm_name = strdup(shm_name);
++    if (!rb->shm_name) {
++        free(rb);
++        return NULL;
++    }
++    
++    // Create shared memory path
++    char shm_path[256];
++    snprintf(shm_path, sizeof(shm_path), "/dev/shm/%s", shm_name);
++    
++    // Open existing shared memory object
++    rb->fd = open(shm_path, O_RDWR, 0666);
++    if (rb->fd == -1) {
++        free(rb->shm_name);
++        free(rb);
++        return NULL;
++    }
++    
++    // Get the file size to determine buffer size
++    struct stat sb;
++    if (fstat(rb->fd, &sb) == -1) {
++        close(rb->fd);
++        free(rb->shm_name);
++        free(rb);
++        return NULL;
++    }
++    
++    rb->mmap_size = sb.st_size;
++    size_t header_size = sizeof(atomic_size_t) * (1 + SHM_IPC_MAX_CONSUMERS + 1);
++    rb->buffer_size = rb->mmap_size - header_size;
++    
++    // Memory map the shared object
++    rb->mmap_addr = mmap(NULL, rb->mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, rb->fd, 0);
++    if (rb->mmap_addr == MAP_FAILED) {
++        close(rb->fd);
++        free(rb->shm_name);
++        free(rb);
++        return NULL;
++    }
++    
++    // Setup pointers to the mapped memory
++    rb->write_index = (atomic_size_t*)rb->mmap_addr;
++    for (int i = 0; i < SHM_IPC_MAX_CONSUMERS; i++) {
++        rb->read_indices[i] = (atomic_size_t*)((uint8_t*)rb->mmap_addr + sizeof(atomic_size_t) * (i + 1));
++    }
++    rb->consumer_active = (atomic_size_t*)((uint8_t*)rb->mmap_addr + sizeof(atomic_size_t) * (1 + SHM_IPC_MAX_CONSUMERS));
++    rb->data = (uint8_t*)rb->mmap_addr + header_size;
++    
++    // Mark this consumer as active
++    atomic_fetch_or(rb->consumer_active, 1 << consumer_id);
++    
++    return rb;
++}
++
++/**
++ * Opens an existing shared memory ring buffer (consumer 0)
++ */
++RingBuffer* shm_ipc_open(const char* shm_name) {
++    return shm_ipc_open_consumer(shm_name, 0);
++}
++
++/**
++ * Resets a consumer's read index to the current write position
++ */
++bool shm_ipc_reset_consumer(RingBuffer* rb, int consumer_id) {
++    if (!rb || consumer_id < 0 || consumer_id >= SHM_IPC_MAX_CONSUMERS) {
++        return false;
++    }
++    
++    size_t write_idx = atomic_load(rb->write_index);
++    atomic_store(rb->read_indices[consumer_id], write_idx);
++    
++    return true;
++}
++
++/**
++ * Finds the minimum read index among active consumers
++ * Returns write_idx if no consumers are active
++ */
++static size_t find_min_read_index(const RingBuffer* rb) {
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t active_mask = atomic_load(rb->consumer_active);
++    
++    if (active_mask == 0) {
++        return write_idx; // No active consumers
++    }
++    
++    // We need to be careful about comparing indices in a ring buffer,
++    // especially when determining the minimum.
++    
++    // First, count active consumers and collect their read indices
++    size_t indices[SHM_IPC_MAX_CONSUMERS];
++    int count = 0;
++    
++    for (int i = 0; i < SHM_IPC_MAX_CONSUMERS; i++) {
++        if (active_mask & (1 << i)) {
++            indices[count++] = atomic_load(rb->read_indices[i]);
++        }
++    }
++    
++    if (count == 0) {
++        return write_idx; // No active consumers
++    }
++    
++    // For a ring buffer, the "minimum" depends on the position of the write pointer.
++    // We need to find the index that would be encountered first when moving
++    // backward from the write pointer.
++    
++    // First, find the minimum index among those that are <= write_idx
++    size_t min_le = write_idx;
++    bool found_le = false;
++    
++    for (int i = 0; i < count; i++) {
++        size_t idx = indices[i];
++        if (idx <= write_idx && (!found_le || idx < min_le)) {
++            min_le = idx;
++            found_le = true;
++        }
++    }
++    
++    // Now find the maximum index among those that are > write_idx
++    size_t max_gt = 0;
++    bool found_gt = false;
++    
++    for (int i = 0; i < count; i++) {
++        size_t idx = indices[i];
++        if (idx > write_idx && (!found_gt || idx > max_gt)) {
++            max_gt = idx;
++            found_gt = true;
++        }
++    }
++    
++    // If we found indices <= write_idx, the minimum is the smallest of these
++    if (found_le) {
++        return min_le;
++    }
++    
++    // Otherwise, it's the largest of the indices > write_idx
++    if (found_gt) {
++        return max_gt;
++    }
++    
++    // This should never happen if count > 0
++    return write_idx;
++}
++
++/**
++ * Calculates available space considering buffer wrapping correctly
++ */
++static size_t calculate_available_space(const RingBuffer* rb, size_t write_idx, size_t min_read_idx) {
++    // In a ring buffer, available space depends on the relative positions of 
++    // write_idx and min_read_idx.
++    
++    if (min_read_idx == write_idx) {
++        // Either buffer is completely empty or completely full.
++        // Since this is called from write operations, we assume empty.
++        return rb->buffer_size - 1; // Keep one byte free
++    }
++    
++    if (min_read_idx > write_idx) {
++        // Read index is ahead of write index - we have a clear run
++        // [===W-----R===]
++        return min_read_idx - write_idx - 1;
++    } else {
++        // Write index is ahead of read index - we have to wrap around
++        // [---R=====W---]
++        return rb->buffer_size - (write_idx - min_read_idx) - 1;
++    }
++}
++
++/**
++ * Writes data to the ring buffer
++ */
++bool shm_ipc_write(RingBuffer* rb, const uint8_t* data, size_t len) {
++    if (!rb || !data || len == 0) {
++        return false;
++    }
++    
++    // Only the producer can write
++    if (rb->consumer_id != -1) {
++        return false;
++    }
++    
++    // Check if buffer is big enough for this message
++    if (len >= rb->buffer_size) {
++        return false; // Message too large for buffer
++    }
++    
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t min_read_idx = find_min_read_index(rb);
++    
++    // Calculate available space
++    size_t available_space = calculate_available_space(rb, write_idx, min_read_idx);
++    
++    if (available_space < len) {
++        return false; // Not enough space
++    }
++    
++    // Handle wrap-around case
++    if (write_idx + len > rb->buffer_size) {
++        size_t first_chunk_size = rb->buffer_size - write_idx;
++        size_t second_chunk_size = len - first_chunk_size;
++        
++        // Write first chunk up to end of buffer
++        memcpy(rb->data + write_idx, data, first_chunk_size);
++        
++        // Write second chunk from start of buffer
++        if (second_chunk_size > 0) {
++            memcpy(rb->data, data + first_chunk_size, second_chunk_size);
++        }
++        
++        // Update write index - atomic store ensures visibility to consumers
++        atomic_store(rb->write_index, second_chunk_size);
++    } else {
++        // No wrap-around needed
++        memcpy(rb->data + write_idx, data, len);
++        
++        // Update write index
++        size_t new_write_idx = write_idx + len;
++        if (new_write_idx == rb->buffer_size) {
++            new_write_idx = 0; // Wrap exactly at buffer end
++        }
++        atomic_store(rb->write_index, new_write_idx);
++    }
++    
++    return true;
++}
++
++/**
++ * Reads data from the ring buffer
++ */
++int shm_ipc_read(RingBuffer* rb, uint8_t* buffer, size_t max_len) {
++    if (!rb || !buffer || max_len == 0) {
++        return -1;
++    }
++    
++    // Make sure this is a consumer
++    if (rb->consumer_id < 0 || rb->consumer_id >= SHM_IPC_MAX_CONSUMERS) {
++        return -1;
++    }
++    
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t read_idx = atomic_load(rb->read_indices[rb->consumer_id]);
++    
++    if (read_idx == write_idx) {
++        return 0; // Buffer empty for this consumer
++    }
++    
++    // Calculate available data (need to handle wrap-around)
++    size_t available_data;
++    if (write_idx > read_idx) {
++        available_data = write_idx - read_idx;
++    } else {
++        available_data = rb->buffer_size - read_idx + write_idx;
++    }
++    
++    size_t bytes_to_read = (max_len < available_data) ? max_len : available_data;
++    
++    // Handle wrap-around case
++    if (read_idx + bytes_to_read > rb->buffer_size) {
++        size_t first_chunk_size = rb->buffer_size - read_idx;
++        size_t second_chunk_size = bytes_to_read - first_chunk_size;
++        
++        // Read first chunk from end of buffer
++        memcpy(buffer, rb->data + read_idx, first_chunk_size);
++        
++        // Read second chunk from start of buffer
++        if (second_chunk_size > 0) {
++            memcpy(buffer + first_chunk_size, rb->data, second_chunk_size);
++        }
++        
++        // Update read index
++        atomic_store(rb->read_indices[rb->consumer_id], second_chunk_size);
++    } else {
++        // No wrap-around needed
++        memcpy(buffer, rb->data + read_idx, bytes_to_read);
++        
++        // Update read index
++        size_t new_read_idx = read_idx + bytes_to_read;
++        if (new_read_idx == rb->buffer_size) {
++            new_read_idx = 0; // Wrap exactly at buffer end
++        }
++        atomic_store(rb->read_indices[rb->consumer_id], new_read_idx);
++    }
++    
++    return bytes_to_read;
++}
++
++/**
++ * Returns the number of bytes available to read
++ */
++size_t shm_ipc_available(const RingBuffer* rb) {
++    if (!rb) {
++        return 0;
++    }
++    
++    // Make sure this is a consumer
++    if (rb->consumer_id < 0 || rb->consumer_id >= SHM_IPC_MAX_CONSUMERS) {
++        return 0;
++    }
++    
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t read_idx = atomic_load(rb->read_indices[rb->consumer_id]);
++    
++    if (write_idx >= read_idx) {
++        return write_idx - read_idx;
++    } else {
++        return rb->buffer_size - read_idx + write_idx;
++    }
++}
++
++/**
++ * Returns the free space available for writing
++ */
++size_t shm_ipc_free_space(const RingBuffer* rb) {
++    if (!rb) {
++        return 0;
++    }
++    
++    // Only the producer can check free space
++    if (rb->consumer_id != -1) {
++        return 0;
++    }
++    
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t min_read_idx = find_min_read_index(rb);
++    
++    return calculate_available_space(rb, write_idx, min_read_idx);
++}
++
++/**
++ * Returns the total size of the buffer
++ */
++size_t shm_ipc_buffer_size(const RingBuffer* rb) {
++    if (!rb) {
++        return 0;
++    }
++    
++    return rb->buffer_size;
++}
++
++/**
++ * Returns the consumer ID
++ */
++int shm_ipc_get_consumer_id(const RingBuffer* rb) {
++    if (!rb) {
++        return -1;
++    }
++    
++    return rb->consumer_id;
++}
++
++/**
++ * Returns the number of active consumers
++ */
++int shm_ipc_get_consumer_count(const RingBuffer* rb) {
++    if (!rb) {
++        return 0;
++    }
++    
++    size_t active_mask = atomic_load(rb->consumer_active);
++    int count = 0;
++    
++    for (int i = 0; i < SHM_IPC_MAX_CONSUMERS; i++) {
++        if (active_mask & (1 << i)) {
++            count++;
++        }
++    }
++    
++    return count;
++}
++
++/**
++ * Destroys the ring buffer
++ */
++void shm_ipc_destroy(RingBuffer* rb) {
++    if (!rb) {
++        return;
++    }
++    
++    // If this is a consumer, mark it as inactive
++    if (rb->consumer_id >= 0 && rb->consumer_id < SHM_IPC_MAX_CONSUMERS) {
++        atomic_fetch_and(rb->consumer_active, ~(1 << rb->consumer_id));
++    }
++    
++    if (rb->mmap_addr != MAP_FAILED && rb->mmap_addr != NULL) {
++        munmap(rb->mmap_addr, rb->mmap_size);
++    }
++    
++    if (rb->fd != -1) {
++        close(rb->fd);
++    }
++    
++    free(rb->shm_name);
++    free(rb);
++}
++
++/**
++ * Writes a complete message to the ring buffer with message framing
++ * Format: [message_length (4 bytes)][message_data (n bytes)]
++ */
++bool shm_ipc_write_message(RingBuffer* rb, const uint8_t* data, size_t len) {
++    if (!rb || !data || len == 0 || len > SHM_IPC_MAX_MESSAGE_SIZE) {
++        return false;
++    }
++    
++    // Only the producer can write
++    if (rb->consumer_id != -1) {
++        return false;
++    }
++    
++    // Calculate total size needed for the message with header
++    size_t total_size = MESSAGE_HEADER_SIZE + len;
++    
++    // Check if buffer is big enough for this message
++    if (total_size >= rb->buffer_size) {
++        return false; // Message too large for buffer
++    }
++    
++    // Get current write position and calculate available space
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t min_read_idx = find_min_read_index(rb);
++    size_t available_space = calculate_available_space(rb, write_idx, min_read_idx);
++    
++    if (available_space < total_size) {
++        return false; // Not enough space
++    }
++    
++    // First write the message length (4 bytes)
++    uint32_t msg_len = (uint32_t)len;
++    
++    // Handle wrap-around for the header
++    if (write_idx + MESSAGE_HEADER_SIZE > rb->buffer_size) {
++        // Header wraps around
++        size_t first_chunk = rb->buffer_size - write_idx;
++        size_t second_chunk = MESSAGE_HEADER_SIZE - first_chunk;
++        
++        memcpy(rb->data + write_idx, &msg_len, first_chunk);
++        memcpy(rb->data, ((uint8_t*)&msg_len) + first_chunk, second_chunk);
++        
++        write_idx = second_chunk;
++    } else {
++        // Header fits without wrapping
++        memcpy(rb->data + write_idx, &msg_len, MESSAGE_HEADER_SIZE);
++        write_idx = (write_idx + MESSAGE_HEADER_SIZE) % rb->buffer_size;
++    }
++    
++    // Now write the message data
++    if (write_idx + len > rb->buffer_size) {
++        // Message data wraps around
++        size_t first_chunk = rb->buffer_size - write_idx;
++        size_t second_chunk = len - first_chunk;
++        
++        memcpy(rb->data + write_idx, data, first_chunk);
++        memcpy(rb->data, data + first_chunk, second_chunk);
++        
++        // Update write index
++        atomic_store(rb->write_index, second_chunk);
++    } else {
++        // Message data fits without wrapping
++        memcpy(rb->data + write_idx, data, len);
++        
++        // Update write index
++        size_t new_write_idx = write_idx + len;
++        if (new_write_idx == rb->buffer_size) {
++            new_write_idx = 0;
++        }
++        atomic_store(rb->write_index, new_write_idx);
++    }
++    
++    return true;
++}
++
++/**
++ * Helper function to peek at bytes from the ring buffer without advancing the read index
++ */
++static bool peek_bytes(const RingBuffer* rb, size_t read_idx, void* buffer, size_t len) {
++    if (!rb || !buffer || len == 0) {
++        return false;
++    }
++    
++    // Check if there's enough data to peek
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t available;
++    
++    if (write_idx >= read_idx) {
++        available = write_idx - read_idx;
++    } else {
++        available = rb->buffer_size - read_idx + write_idx;
++    }
++    
++    if (available < len) {
++        return false;
++    }
++    
++    // Copy the data without advancing the read index
++    if (read_idx + len > rb->buffer_size) {
++        // Data wraps around
++        size_t first_chunk = rb->buffer_size - read_idx;
++        size_t second_chunk = len - first_chunk;
++        
++        memcpy(buffer, rb->data + read_idx, first_chunk);
++        memcpy((uint8_t*)buffer + first_chunk, rb->data, second_chunk);
++    } else {
++        // Data fits without wrapping
++        memcpy(buffer, rb->data + read_idx, len);
++    }
++    
++    return true;
++}
++
++/**
++ * Checks if a complete message is available for reading
++ */
++bool shm_ipc_message_available(const RingBuffer* rb, size_t* message_size) {
++    if (!rb) {
++        return false;
++    }
++    
++    // Make sure this is a consumer
++    if (rb->consumer_id < 0 || rb->consumer_id >= SHM_IPC_MAX_CONSUMERS) {
++        return false;
++    }
++    
++    // Get current read position
++    size_t read_idx = atomic_load(rb->read_indices[rb->consumer_id]);
++    
++    // Try to read message length
++    uint32_t msg_len;
++    if (!peek_bytes(rb, read_idx, &msg_len, MESSAGE_HEADER_SIZE)) {
++        return false; // Not enough data for message header
++    }
++    
++    // Calculate total message size (header + data)
++    size_t total_size = MESSAGE_HEADER_SIZE + msg_len;
++    
++    // Check if we have the complete message
++    size_t write_idx = atomic_load(rb->write_index);
++    size_t available;
++    
++    if (write_idx >= read_idx) {
++        available = write_idx - read_idx;
++    } else {
++        available = rb->buffer_size - read_idx + write_idx;
++    }
++    
++    if (available < total_size) {
++        return false; // Don't have the complete message yet
++    }
++    
++    // If message_size pointer is provided, return the message data size
++    if (message_size != NULL) {
++        *message_size = msg_len;
++    }
++    
++    return true;
++}
++
++/**
++ * Reads a complete message from the ring buffer
++ */
++bool shm_ipc_read_message(RingBuffer* rb, uint8_t* buffer, size_t buffer_size, size_t* message_size) {
++    if (!rb || !buffer || buffer_size == 0) {
++        return false;
++    }
++    
++    // Make sure this is a consumer
++    if (rb->consumer_id < 0 || rb->consumer_id >= SHM_IPC_MAX_CONSUMERS) {
++        return false;
++    }
++    
++    // Check if a message is available and get its size
++    size_t msg_len;
++    if (!shm_ipc_message_available(rb, &msg_len)) {
++        return false; // No complete message available
++    }
++    
++    // Check if our buffer is large enough
++    if (buffer_size < msg_len) {
++        return false; // Buffer too small
++    }
++    
++    // Get current read position
++    size_t read_idx = atomic_load(rb->read_indices[rb->consumer_id]);
++    
++    // Skip over the message length header
++    if (read_idx + MESSAGE_HEADER_SIZE > rb->buffer_size) {
++        // Header wraps around
++        read_idx = (read_idx + MESSAGE_HEADER_SIZE) - rb->buffer_size;
++    } else {
++        read_idx = (read_idx + MESSAGE_HEADER_SIZE);
++    }
++    
++    // Read the message data
++    if (read_idx + msg_len > rb->buffer_size) {
++        // Message data wraps around
++        size_t first_chunk = rb->buffer_size - read_idx;
++        size_t second_chunk = msg_len - first_chunk;
++        
++        memcpy(buffer, rb->data + read_idx, first_chunk);
++        memcpy(buffer + first_chunk, rb->data, second_chunk);
++        
++        // Update read index
++        atomic_store(rb->read_indices[rb->consumer_id], second_chunk);
++    } else {
++        // Message data fits without wrapping
++        memcpy(buffer, rb->data + read_idx, msg_len);
++        
++        // Update read index
++        size_t new_read_idx = read_idx + msg_len;
++        if (new_read_idx == rb->buffer_size) {
++            new_read_idx = 0;
++        }
++        atomic_store(rb->read_indices[rb->consumer_id], new_read_idx);
++    }
++    
++    // If message_size pointer is provided, return the message data size
++    if (message_size != NULL) {
++        *message_size = msg_len;
++    }
++    
++    return true;
++} 
+\ No newline at end of file
+diff --git a/src/shm_ipc.h b/src/shm_ipc.h
+new file mode 100644
+index 0000000..cad4bac
+--- /dev/null
++++ b/src/shm_ipc.h
+@@ -0,0 +1,149 @@
++#ifndef SHM_IPC_H
++#define SHM_IPC_H
++
++#include <stddef.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Maximum number of supported consumers
++ */
++#define SHM_IPC_MAX_CONSUMERS 8
++
++/**
++ * Maximum message size
++ */
++#define SHM_IPC_MAX_MESSAGE_SIZE (1024 * 1024) // 1MB
++
++/**
++ * Ring buffer structure for IPC communication
++ */
++typedef struct RingBuffer RingBuffer;
++
++/**
++ * Creates a new shared memory ring buffer
++ * @param shm_name Name of the shared memory segment
++ * @param size Size of the buffer in bytes, 0 means use default (1MB)
++ * @return Pointer to the ring buffer, or NULL on error
++ */
++RingBuffer* shm_ipc_create(const char* shm_name, size_t size);
++
++/**
++ * Opens an existing shared memory ring buffer as a consumer
++ * @param shm_name Name of the shared memory segment
++ * @param consumer_id ID of the consumer (0 to SHM_IPC_MAX_CONSUMERS-1)
++ * @return Pointer to the ring buffer, or NULL on error
++ */
++RingBuffer* shm_ipc_open_consumer(const char* shm_name, int consumer_id);
++
++/**
++ * Opens an existing shared memory ring buffer (equivalent to consumer_id 0)
++ * @param shm_name Name of the shared memory segment
++ * @return Pointer to the ring buffer, or NULL on error
++ */
++RingBuffer* shm_ipc_open(const char* shm_name);
++
++/**
++ * Resets a consumer's read index to the current write position
++ * @param rb Pointer to the ring buffer
++ * @param consumer_id ID of the consumer (0 to SHM_IPC_MAX_CONSUMERS-1)
++ * @return true if successful, false otherwise
++ */
++bool shm_ipc_reset_consumer(RingBuffer* rb, int consumer_id);
++
++/**
++ * Writes data to the ring buffer
++ * @param rb Pointer to the ring buffer
++ * @param data Data to write
++ * @param len Length of the data
++ * @return true if write was successful, false otherwise
++ */
++bool shm_ipc_write(RingBuffer* rb, const uint8_t* data, size_t len);
++
++/**
++ * Writes a complete message to the ring buffer with message framing
++ * @param rb Pointer to the ring buffer
++ * @param data Message data to write
++ * @param len Length of the message
++ * @return true if write was successful, false otherwise
++ */
++bool shm_ipc_write_message(RingBuffer* rb, const uint8_t* data, size_t len);
++
++/**
++ * Reads data from the ring buffer
++ * @param rb Pointer to the ring buffer
++ * @param buffer Buffer to read into
++ * @param max_len Maximum number of bytes to read
++ * @return Number of bytes read, or -1 on error
++ */
++int shm_ipc_read(RingBuffer* rb, uint8_t* buffer, size_t max_len);
++
++/**
++ * Reads a complete message from the ring buffer
++ * This function reads a message that was written using shm_ipc_write_message
++ * @param rb Pointer to the ring buffer
++ * @param buffer Buffer to read the message into
++ * @param buffer_size Size of the provided buffer
++ * @param message_size Optional pointer to receive the actual message size
++ * @return true if a message was read successfully, false if no message available or error
++ */
++bool shm_ipc_read_message(RingBuffer* rb, uint8_t* buffer, size_t buffer_size, size_t* message_size);
++
++/**
++ * Checks if a complete message is available for reading
++ * @param rb Pointer to the ring buffer
++ * @param message_size Optional pointer to receive the size of the next message
++ * @return true if a complete message is available, false otherwise
++ */
++bool shm_ipc_message_available(const RingBuffer* rb, size_t* message_size);
++
++/**
++ * Returns the number of bytes available to read
++ * @param rb Pointer to the ring buffer
++ * @return Number of bytes available
++ */
++size_t shm_ipc_available(const RingBuffer* rb);
++
++/**
++ * Returns the free space available for writing
++ * @param rb Pointer to the ring buffer
++ * @return Number of bytes free
++ */
++size_t shm_ipc_free_space(const RingBuffer* rb);
++
++/**
++ * Returns the total size of the buffer
++ * @param rb Pointer to the ring buffer
++ * @return Total buffer size in bytes
++ */
++size_t shm_ipc_buffer_size(const RingBuffer* rb);
++
++/**
++ * Returns the consumer ID associated with this ring buffer
++ * @param rb Pointer to the ring buffer
++ * @return Consumer ID, or -1 if this is a producer
++ */
++int shm_ipc_get_consumer_id(const RingBuffer* rb);
++
++/**
++ * Returns the number of active consumers
++ * @param rb Pointer to the ring buffer
++ * @return Number of active consumers
++ */
++int shm_ipc_get_consumer_count(const RingBuffer* rb);
++
++/**
++ * Destroys the ring buffer
++ * @param rb Pointer to the ring buffer
++ */
++void shm_ipc_destroy(RingBuffer* rb);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SHM_IPC_H */ 
+\ No newline at end of file
+diff --git a/src/shm_ipc_wrapper.cpp b/src/shm_ipc_wrapper.cpp
+new file mode 100644
+index 0000000..97be00a
+--- /dev/null
++++ b/src/shm_ipc_wrapper.cpp
+@@ -0,0 +1,274 @@
++#include "shm_ipc_wrapper.h"
++#include "shm_ipc.h"
++#include <cstring>
++#include <utility>
++
++namespace shm_ipc {
++
++SharedRingBuffer::SharedRingBuffer(const std::string& name, size_t size)
++    : name_(name) {
++    rb_ = shm_ipc_create(name.c_str(), size);
++    if (!rb_) {
++        throw ShmException("Failed to create shared memory ring buffer");
++    }
++}
++
++SharedRingBuffer SharedRingBuffer::open_consumer(const std::string& name, int consumer_id,
++                                               bool create_if_not_exists, size_t size) {
++    RingBuffer* rb = shm_ipc_open_consumer(name.c_str(), consumer_id);
++    
++    if (!rb && create_if_not_exists) {
++        rb = shm_ipc_create(name.c_str(), size);
++        if (rb) {
++            // The created buffer is a producer, we need to destroy it and open as consumer
++            shm_ipc_destroy(rb);
++            rb = shm_ipc_open_consumer(name.c_str(), consumer_id);
++        }
++    }
++    
++    if (!rb) {
++        throw ShmException("Failed to open shared memory ring buffer as consumer " + std::to_string(consumer_id));
++    }
++    
++    return SharedRingBuffer(rb, name);
++}
++
++SharedRingBuffer SharedRingBuffer::open(const std::string& name, bool create_if_not_exists, size_t size) {
++    return open_consumer(name, 0, create_if_not_exists, size);
++}
++
++bool SharedRingBuffer::reset_consumer(int consumer_id) {
++    if (!rb_) {
++        throw ShmException("Ring buffer is not initialized");
++    }
++    
++    // If consumer_id is -1, use the ID of this consumer
++    if (consumer_id == -1) {
++        consumer_id = shm_ipc_get_consumer_id(rb_);
++        if (consumer_id == -1) {
++            throw ShmException("Cannot reset a producer");
++        }
++    }
++    
++    return shm_ipc_reset_consumer(rb_, consumer_id);
++}
++
++SharedRingBuffer::SharedRingBuffer(RingBuffer* rb, const std::string& name)
++    : rb_(rb), name_(name) {
++}
++
++SharedRingBuffer::~SharedRingBuffer() {
++    if (rb_) {
++        shm_ipc_destroy(rb_);
++        rb_ = nullptr;
++    }
++}
++
++SharedRingBuffer::SharedRingBuffer(SharedRingBuffer&& other) noexcept
++    : rb_(other.rb_), name_(std::move(other.name_)) {
++    other.rb_ = nullptr;
++}
++
++SharedRingBuffer& SharedRingBuffer::operator=(SharedRingBuffer&& other) noexcept {
++    if (this != &other) {
++        if (rb_) {
++            shm_ipc_destroy(rb_);
++        }
++        
++        rb_ = other.rb_;
++        name_ = std::move(other.name_);
++        
++        other.rb_ = nullptr;
++    }
++    return *this;
++}
++
++size_t SharedRingBuffer::write(const std::vector<uint8_t>& data) {
++    return write(data.data(), data.size());
++}
++
++size_t SharedRingBuffer::write(const uint8_t* data, size_t size) {
++    if (!rb_) {
++        throw ShmException("Ring buffer is not initialized");
++    }
++    
++    if (size == 0) {
++        return 0;
++    }
++    
++    if (!is_producer()) {
++        throw ShmException("Only producers can write to the buffer");
++    }
++    
++    bool success = shm_ipc_write(rb_, data, size);
++    if (!success) {
++        // This might be a buffer full condition, which isn't necessarily an error
++        if (shm_ipc_free_space(rb_) < size) {
++            return 0; // Buffer full
++        }
++        throw ShmException("Failed to write to ring buffer");
++    }
++    
++    return size;
++}
++
++std::vector<uint8_t> SharedRingBuffer::read(size_t max_size) {
++    if (!rb_) {
++        throw ShmException("Ring buffer is not initialized");
++    }
++    
++    if (max_size == 0) {
++        return {};
++    }
++    
++    if (is_producer()) {
++        throw ShmException("Only consumers can read from the buffer");
++    }
++    
++    std::vector<uint8_t> buffer(max_size);
++    size_t bytes_read = read(buffer.data(), max_size);
++    buffer.resize(bytes_read);
++    return buffer;
++}
++
++size_t SharedRingBuffer::read(uint8_t* buffer, size_t max_size) {
++    if (!rb_) {
++        throw ShmException("Ring buffer is not initialized");
++    }
++    
++    if (max_size == 0 || !buffer) {
++        return 0;
++    }
++    
++    if (is_producer()) {
++        throw ShmException("Only consumers can read from the buffer");
++    }
++    
++    int result = shm_ipc_read(rb_, buffer, max_size);
++    if (result < 0) {
++        throw ShmException("Failed to read from ring buffer");
++    }
++    
++    return static_cast<size_t>(result);
++}
++
++size_t SharedRingBuffer::available() const {
++    if (!rb_) {
++        return 0;
++    }
++    
++    if (is_producer()) {
++        return 0; // Producers can't check available data
++    }
++    
++    return shm_ipc_available(rb_);
++}
++
++size_t SharedRingBuffer::free_space() const {
++    if (!rb_) {
++        return 0;
++    }
++    
++    if (!is_producer()) {
++        return 0; // Consumers can't check free space
++    }
++    
++    return shm_ipc_free_space(rb_);
++}
++
++size_t SharedRingBuffer::buffer_size() const {
++    if (!rb_) {
++        return 0;
++    }
++    
++    return shm_ipc_buffer_size(rb_);
++}
++
++int SharedRingBuffer::consumer_id() const {
++    if (!rb_) {
++        return -1;
++    }
++    
++    return shm_ipc_get_consumer_id(rb_);
++}
++
++int SharedRingBuffer::consumer_count() const {
++    if (!rb_) {
++        return 0;
++    }
++    
++    return shm_ipc_get_consumer_count(rb_);
++}
++
++bool SharedRingBuffer::write_message(const std::vector<uint8_t>& data) {
++    return write_message(data.data(), data.size());
++}
++
++bool SharedRingBuffer::write_message(const uint8_t* data, size_t size) {
++    if (!rb_) {
++        throw ShmException("Ring buffer is not initialized");
++    }
++    
++    if (size == 0) {
++        return true; // Empty message is always successful
++    }
++    
++    if (!is_producer()) {
++        throw ShmException("Only producers can write messages to the buffer");
++    }
++    
++    return shm_ipc_write_message(rb_, data, size);
++}
++
++std::vector<uint8_t> SharedRingBuffer::read_message() {
++    if (!rb_) {
++        throw ShmException("Ring buffer is not initialized");
++    }
++    
++    if (is_producer()) {
++        throw ShmException("Only consumers can read messages from the buffer");
++    }
++    
++    // Check if a message is available and get its size
++    auto msg_size_opt = message_available();
++    if (!msg_size_opt) {
++        return {}; // No message available
++    }
++    
++    size_t msg_size = *msg_size_opt;
++    std::vector<uint8_t> buffer(msg_size);
++    
++    // Read the message
++    size_t actual_size;
++    bool success = shm_ipc_read_message(rb_, buffer.data(), buffer.size(), &actual_size);
++    
++    if (!success) {
++        throw ShmException("Failed to read message from ring buffer");
++    }
++    
++    // Resize the buffer to the actual message size
++    if (actual_size != msg_size) {
++        buffer.resize(actual_size);
++    }
++    
++    return buffer;
++}
++
++std::optional<size_t> SharedRingBuffer::message_available() const {
++    if (!rb_) {
++        return std::nullopt;
++    }
++    
++    if (is_producer()) {
++        return std::nullopt; // Producers can't check available messages
++    }
++    
++    size_t msg_size;
++    if (shm_ipc_message_available(rb_, &msg_size)) {
++        return msg_size;
++    }
++    
++    return std::nullopt;
++}
++
++} // namespace shm_ipc 
+\ No newline at end of file
+diff --git a/src/shm_ipc_wrapper.h b/src/shm_ipc_wrapper.h
+new file mode 100644
+index 0000000..48b9d05
+--- /dev/null
++++ b/src/shm_ipc_wrapper.h
+@@ -0,0 +1,196 @@
++#pragma once
++
++#include <string>
++#include <vector>
++#include <memory>
++#include <stdexcept>
++#include <cstdint>
++#include <optional>
++
++// Forward declaration of the C RingBuffer struct
++struct RingBuffer;
++
++namespace shm_ipc {
++
++/**
++ * Exception thrown when shared memory operations fail
++ */
++class ShmException : public std::runtime_error {
++public:
++    explicit ShmException(const std::string& message)
++        : std::runtime_error(message) {}
++};
++
++/**
++ * C++ wrapper for the C shared memory IPC ring buffer.
++ * Implements a producer-consumer pattern with shared memory.
++ */
++class SharedRingBuffer {
++public:
++    /**
++     * Creates a new shared memory ring buffer (producer)
++     * @param name Name of the shared memory segment
++     * @param size Size of the buffer in bytes, 0 means use default (1MB)
++     * @throws ShmException if creation fails
++     */
++    SharedRingBuffer(const std::string& name, size_t size = 0);
++    
++    /**
++     * Opens an existing shared memory ring buffer as a specific consumer
++     * @param name Name of the shared memory segment
++     * @param consumer_id ID of the consumer (0 to 7)
++     * @param create_if_not_exists If true, creates the buffer if it doesn't exist
++     * @param size Size of the buffer if creating, ignored otherwise
++     * @throws ShmException if open fails
++     */
++    static SharedRingBuffer open_consumer(const std::string& name, int consumer_id, 
++                                         bool create_if_not_exists = false, 
++                                         size_t size = 0);
++    
++    /**
++     * Opens an existing shared memory ring buffer (as consumer 0)
++     * @param name Name of the shared memory segment
++     * @param create_if_not_exists If true, creates the buffer if it doesn't exist
++     * @param size Size of the buffer if creating, ignored otherwise
++     * @throws ShmException if open fails
++     */
++    static SharedRingBuffer open(const std::string& name, 
++                                bool create_if_not_exists = false, 
++                                size_t size = 0);
++    
++    /**
++     * Resets a consumer's read position to the current write position,
++     * effectively skipping all pending data.
++     * @param consumer_id ID of the consumer to reset, or -1 to reset this consumer
++     * @return true if successful, false otherwise
++     */
++    bool reset_consumer(int consumer_id = -1);
++    
++    /**
++     * Destructor - releases resources
++     */
++    ~SharedRingBuffer();
++    
++    // No copy
++    SharedRingBuffer(const SharedRingBuffer&) = delete;
++    SharedRingBuffer& operator=(const SharedRingBuffer&) = delete;
++    
++    // Move is allowed
++    SharedRingBuffer(SharedRingBuffer&& other) noexcept;
++    SharedRingBuffer& operator=(SharedRingBuffer&& other) noexcept;
++    
++    /**
++     * Writes data to the ring buffer
++     * @param data Data to write
++     * @return Number of bytes written
++     * @throws ShmException if write fails
++     */
++    size_t write(const std::vector<uint8_t>& data);
++    
++    /**
++     * Writes data to the ring buffer
++     * @param data Pointer to data
++     * @param size Size of data
++     * @return Number of bytes written
++     * @throws ShmException if write fails
++     */
++    size_t write(const uint8_t* data, size_t size);
++    
++    /**
++     * Writes a complete message to the ring buffer with message framing
++     * @param data Message data to write
++     * @return true if write was successful, false otherwise
++     * @throws ShmException if write fails
++     */
++    bool write_message(const std::vector<uint8_t>& data);
++    
++    /**
++     * Writes a complete message to the ring buffer with message framing
++     * @param data Pointer to message data
++     * @param size Size of message data
++     * @return true if write was successful, false otherwise
++     * @throws ShmException if write fails
++     */
++    bool write_message(const uint8_t* data, size_t size);
++    
++    /**
++     * Reads data from the ring buffer
++     * @param max_size Maximum number of bytes to read
++     * @return Vector containing the read data
++     * @throws ShmException if read fails
++     */
++    std::vector<uint8_t> read(size_t max_size);
++    
++    /**
++     * Reads data from the ring buffer into a buffer
++     * @param buffer Buffer to read into
++     * @param max_size Maximum number of bytes to read
++     * @return Number of bytes read
++     * @throws ShmException if read fails
++     */
++    size_t read(uint8_t* buffer, size_t max_size);
++    
++    /**
++     * Reads a complete message from the ring buffer
++     * This function reads a message that was written using write_message
++     * @return Vector containing the message data, or empty vector if no message available
++     * @throws ShmException if read fails
++     */
++    std::vector<uint8_t> read_message();
++    
++    /**
++     * Checks if a complete message is available for reading
++     * @return Optional containing the message size, or std::nullopt if no message available
++     */
++    std::optional<size_t> message_available() const;
++    
++    /**
++     * Returns the number of bytes available to read
++     * @return Number of bytes available
++     */
++    size_t available() const;
++    
++    /**
++     * Returns the free space available for writing
++     * @return Number of bytes free
++     */
++    size_t free_space() const;
++    
++    /**
++     * Returns the total buffer size
++     * @return Buffer size in bytes
++     */
++    size_t buffer_size() const;
++    
++    /**
++     * Returns the name of the shared memory segment
++     * @return Name of the shared memory segment
++     */
++    const std::string& name() const { return name_; }
++    
++    /**
++     * Returns the consumer ID or -1 if this is a producer
++     * @return Consumer ID or -1
++     */
++    int consumer_id() const;
++    
++    /**
++     * Returns the number of active consumers
++     * @return Number of active consumers
++     */
++    int consumer_count() const;
++    
++    /**
++     * Returns whether this instance is a producer
++     * @return true if this is a producer, false if this is a consumer
++     */
++    bool is_producer() const { return consumer_id() == -1; }
++
++private:
++    explicit SharedRingBuffer(RingBuffer* rb, const std::string& name);
++    
++    RingBuffer* rb_;
++    std::string name_;
++};
++
++} // namespace shm_ipc 
+\ No newline at end of file
+diff --git a/tests/test_multi_consumer.cpp b/tests/test_multi_consumer.cpp
+new file mode 100644
+index 0000000..8579233
+--- /dev/null
++++ b/tests/test_multi_consumer.cpp
+@@ -0,0 +1,353 @@
++#define CATCH_CONFIG_MAIN
++#include <catch2/catch.hpp>
++#include "shm_ipc_wrapper.h"
++#include <algorithm>
++#include <atomic>
++#include <thread>
++#include <chrono>
++#include <iostream>
++#include <vector>
++#include <mutex>
++#include <condition_variable>
++#include <random>
++
++using namespace shm_ipc;
++using namespace std::chrono_literals;
++
++// Mutex for synchronized console output
++std::mutex cout_mutex;
++#define SAFE_COUT(msg) { std::lock_guard<std::mutex> lock(cout_mutex); std::cout << msg << std::endl; }
++
++TEST_CASE("Multiple consumers", "[multi_consumer]") {
++    const std::string test_name = "test_multi_consumer";
++    // Randomize buffer size between 512KB and 2MB
++    std::random_device rd;
++    std::mt19937 gen(rd());
++    std::uniform_int_distribution<> buffer_size_dist(512 * 1024, 2 * 1024 * 1024);
++    const size_t buffer_size = buffer_size_dist(gen);
++    std::cout << "Multi-consumer test with buffer size: " << (buffer_size / 1024) << " KB" << std::endl;
++    
++    // Create a producer
++    SharedRingBuffer producer(test_name, buffer_size);
++    
++    SECTION("Open multiple consumers") {
++        // Randomize number of consumers between 2 and 8 (maximum supported)
++        std::uniform_int_distribution<> consumer_count_dist(2, 8);
++        int num_consumers = consumer_count_dist(gen);
++        
++        // Create consumers using vector
++        std::vector<SharedRingBuffer> consumers;
++        
++        for (int i = 0; i < num_consumers; i++) {
++            consumers.push_back(SharedRingBuffer::open_consumer(test_name, i));
++            REQUIRE(consumers[i].consumer_id() == i);
++        }
++        
++        // Check consumer count
++        REQUIRE(producer.consumer_count() == num_consumers);
++        
++        // Generate random data
++        std::uniform_int_distribution<> data_size_dist(10, 1000);
++        size_t data_size = data_size_dist(gen);
++        std::vector<uint8_t> data(data_size);
++        std::generate(data.begin(), data.end(), [&gen]() { 
++            return static_cast<uint8_t>(gen() & 0xFF); 
++        });
++        
++        REQUIRE(producer.write(data) == data.size());
++        
++        // Each consumer should see the data
++        for (int i = 0; i < num_consumers; i++) {
++            REQUIRE(consumers[i].available() == data.size());
++            auto read_data = consumers[i].read(data.size());
++            REQUIRE(read_data == data);
++        }
++    }
++    
++    SECTION("Reset consumer") {
++        // Create 3 consumers
++        auto consumer1 = SharedRingBuffer::open_consumer(test_name, 0);
++        auto consumer2 = SharedRingBuffer::open_consumer(test_name, 1);
++        auto consumer3 = SharedRingBuffer::open_consumer(test_name, 2);
++        
++        // Generate random data sets
++        std::uniform_int_distribution<> data_size_dist(10, 1000);
++        std::vector<uint8_t> data1(data_size_dist(gen));
++        std::vector<uint8_t> data2(data_size_dist(gen));
++        
++        std::generate(data1.begin(), data1.end(), [&gen]() { 
++            return static_cast<uint8_t>(gen() & 0xFF); 
++        });
++        std::generate(data2.begin(), data2.end(), [&gen]() { 
++            return static_cast<uint8_t>(gen() & 0xFF); 
++        });
++        
++        REQUIRE(producer.write(data1) == data1.size());
++        
++        // Reset consumer2 (skips data1)
++        REQUIRE(consumer2.reset_consumer());
++        
++        // Write more data
++        REQUIRE(producer.write(data2) == data2.size());
++        
++        // Consumer1 should see both data sets
++        REQUIRE(consumer1.available() == data1.size() + data2.size());
++        auto read1_1 = consumer1.read(data1.size());
++        REQUIRE(read1_1 == data1);
++        auto read1_2 = consumer1.read(data2.size());
++        REQUIRE(read1_2 == data2);
++        
++        // Consumer2 should only see data2
++        REQUIRE(consumer2.available() == data2.size());
++        auto read2 = consumer2.read(data2.size());
++        REQUIRE(read2 == data2);
++        
++        // Consumer3 should see both data sets
++        REQUIRE(consumer3.available() == data1.size() + data2.size());
++        auto read3_1 = consumer3.read(data1.size());
++        REQUIRE(read3_1 == data1);
++        auto read3_2 = consumer3.read(data2.size());
++        REQUIRE(read3_2 == data2);
++    }
++    
++    SECTION("Concurrent readers") {
++        // Randomize number of consumers between 2 and 6
++        std::uniform_int_distribution<> consumer_count_dist(2, 6);
++        const int NUM_CONSUMERS = consumer_count_dist(gen);
++        
++        // Randomize number of messages between 10 and 30
++        std::uniform_int_distribution<> msg_count_dist(10, 30);
++        const int NUM_MESSAGES = msg_count_dist(gen);
++        
++        SAFE_COUT("Starting concurrent reader test with " << NUM_CONSUMERS << " consumers and " << NUM_MESSAGES << " messages");
++        
++        // Track total messages received by all consumers
++        std::atomic<int> total_received{0};
++        
++        // Flag to signal consumers to exit even if they haven't received all messages
++        std::atomic<bool> should_exit{false};
++        
++        // Track the exit status of each consumer
++        std::vector<std::atomic<bool>> consumer_finished(NUM_CONSUMERS);
++        for (auto& flag : consumer_finished) {
++            flag.store(false);
++        }
++        
++        // Create consumer threads
++        std::vector<std::thread> consumer_threads;
++        
++        // Setup random delays for consumers
++        std::uniform_int_distribution<> consumer_delay_dist(1, 30);
++        
++        // Start a watchdog thread to detect deadlocks
++        std::atomic<bool> watchdog_triggered{false};
++        std::thread watchdog([&]() {
++            // Wait for 60 seconds max (increased for randomized tests)
++            for (int i = 0; i < 60; i++) {
++                std::this_thread::sleep_for(1s);
++                
++                // Log progress every 5 seconds
++                if (i % 5 == 0) {
++                    SAFE_COUT("Watchdog: " << i << "s elapsed, " << total_received.load() 
++                             << " messages received out of " << (NUM_CONSUMERS * NUM_MESSAGES) << " expected");
++                }
++                
++                // Check if test is complete
++                if (total_received.load() >= NUM_CONSUMERS * NUM_MESSAGES) {
++                    SAFE_COUT("Watchdog: All messages received, exiting watchdog");
++                    return;
++                }
++                
++                // Check if all consumers are stuck
++                bool all_stuck = true;
++                for (int j = 0; j < NUM_CONSUMERS; j++) {
++                    if (!consumer_finished[j].load()) {
++                        all_stuck = false;
++                        break;
++                    }
++                }
++                
++                if (all_stuck) {
++                    SAFE_COUT("Watchdog: All consumers are stuck, but not all messages received");
++                    should_exit.store(true);
++                    watchdog_triggered.store(true);
++                    return;
++                }
++            }
++            
++            // If we got here, we timed out
++            SAFE_COUT("Watchdog triggered - timeout after 60 seconds!");
++            should_exit.store(true);
++            watchdog_triggered.store(true);
++        });
++        
++        for (int i = 0; i < NUM_CONSUMERS; i++) {
++            consumer_threads.emplace_back([&, i]() {
++                try {
++                    // Introduce random startup delay to test staggered consumer startup
++                    std::this_thread::sleep_for(std::chrono::milliseconds(consumer_delay_dist(gen)));
++                    
++                    // Open as consumer
++                    auto consumer = SharedRingBuffer::open_consumer(test_name, i);
++                    SAFE_COUT("Consumer " << i << " started");
++                    
++                    int messages_received = 0;
++                    auto start_time = std::chrono::steady_clock::now();
++                    
++                    // Create variable read size for more real-world behavior
++                    std::uniform_int_distribution<> read_size_dist(50, 500);
++                    
++                    while (messages_received < NUM_MESSAGES && !should_exit.load()) {
++                        // Randomize read size to test partial reads
++                        size_t read_size = read_size_dist(gen);
++                        auto data = consumer.read(read_size);
++                        
++                        if (!data.empty()) {
++                            messages_received++;
++                            total_received.fetch_add(1);
++                            
++                            // Log each message to debug deadlocks
++                            SAFE_COUT("Consumer " << i << " received message " << messages_received 
++                                     << " (size: " << data.size() << ", value: " << (int)data[0] << ")");
++                        } else {
++                            // Sleep briefly if no data with random backoff
++                            std::uniform_int_distribution<> sleep_dist(1, 20);
++                            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_dist(gen)));
++                        }
++                        
++                        // Check for timeout (20 seconds without progress - increased for random tests)
++                        auto now = std::chrono::steady_clock::now();
++                        if (now - start_time > 20s && messages_received == 0) {
++                            SAFE_COUT("Consumer " << i << " timed out waiting for first message");
++                            break;
++                        }
++                    }
++                    
++                    SAFE_COUT("Consumer " << i << " finished with " << messages_received << " messages");
++                    consumer_finished[i].store(true);
++                } catch (const std::exception& e) {
++                    SAFE_COUT("Consumer " << i << " exception: " << e.what());
++                    consumer_finished[i].store(true);
++                }
++            });
++        }
++        
++        // Give consumers time to start up with random delay
++        std::uniform_int_distribution<> startup_delay_dist(50, 200);
++        std::this_thread::sleep_for(std::chrono::milliseconds(startup_delay_dist(gen)));
++        
++        // Generate random message sizes
++        std::uniform_int_distribution<> msg_size_dist(20, 400);
++        
++        // Producer sends messages with progress reporting
++        for (int i = 0; i < NUM_MESSAGES && !should_exit.load(); i++) {
++            // Create random-sized messages
++            size_t msg_size = msg_size_dist(gen);
++            std::vector<uint8_t> data(msg_size);
++            
++            // Fill with a combination of message number and random data
++            for (size_t j = 0; j < data.size(); j++) {
++                if (j < 4) {
++                    // First 4 bytes encode the message number
++                    data[j] = static_cast<uint8_t>((i >> (j * 8)) & 0xFF);
++                } else {
++                    // Rest is random
++                    data[j] = static_cast<uint8_t>(gen() & 0xFF);
++                }
++            }
++            
++            // Try to write with retry logic
++            bool write_success = false;
++            for (int retry = 0; retry < 5 && !write_success && !should_exit.load(); retry++) {
++                size_t written = producer.write(data);
++                write_success = (written == data.size());
++                
++                if (!write_success) {
++                    SAFE_COUT("Producer write retry " << retry << " for message " << i << " (free space: " << producer.free_space() << ")");
++                    std::this_thread::sleep_for(std::chrono::milliseconds(10 * (retry + 1)));
++                }
++            }
++            
++            if (!write_success) {
++                SAFE_COUT("Producer failed to write message " << i << " after retries (free space: " << producer.free_space() << ")");
++                should_exit.store(true);
++                break;
++            }
++            
++            // Log each message
++            SAFE_COUT("Producer wrote message " << i << " (size: " << data.size() << ")");
++            
++            // Wait between messages with random delay to test varied timing patterns
++            std::uniform_int_distribution<> producer_delay_dist(10, 100);
++            std::this_thread::sleep_for(std::chrono::milliseconds(producer_delay_dist(gen)));
++        }
++        
++        SAFE_COUT("Producer finished writing all messages");
++        
++        // Wait for all consumers to finish or watchdog to trigger
++        for (auto& thread : consumer_threads) {
++            thread.join();
++        }
++        
++        // Wait for watchdog
++        watchdog.join();
++        
++        // Each consumer should have received all messages
++        SAFE_COUT("Total messages received: " << total_received.load() << " out of " << (NUM_CONSUMERS * NUM_MESSAGES) << " expected");
++        
++        if (!watchdog_triggered.load()) {
++            REQUIRE(total_received.load() == NUM_CONSUMERS * NUM_MESSAGES);
++        } else {
++            // If watchdog triggered, test will fail, but at least it won't hang
++            REQUIRE_FALSE(watchdog_triggered.load());
++        }
++    }
++    
++    SECTION("Consumer drop out") {
++        // Create 3 consumers
++        auto consumer1 = SharedRingBuffer::open_consumer(test_name, 0);
++        
++        {
++            // consumer2 in a scope that will automatically destroy it
++            auto consumer2 = SharedRingBuffer::open_consumer(test_name, 1);
++            
++            // Check consumer count
++            REQUIRE(producer.consumer_count() == 2);
++            
++            // Write random sized data
++            std::uniform_int_distribution<> data_size_dist(10, 1000);
++            std::vector<uint8_t> data1(data_size_dist(gen));
++            std::generate(data1.begin(), data1.end(), [&gen]() {
++                return static_cast<uint8_t>(gen() & 0xFF);
++            });
++            
++            REQUIRE(producer.write(data1) == data1.size());
++            
++            // Both consumers read it
++            auto read1 = consumer1.read(data1.size());
++            REQUIRE(read1 == data1);
++            
++            auto read2 = consumer2.read(data1.size());
++            REQUIRE(read2 == data1);
++            
++            // consumer2 goes out of scope and should be destroyed
++        }
++        
++        // Check that consumer count decreased
++        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // Give time for cleanup
++        REQUIRE(producer.consumer_count() == 1);
++        
++        // Write more random data
++        std::uniform_int_distribution<> data_size_dist(10, 1000);
++        std::vector<uint8_t> data2(data_size_dist(gen));
++        std::generate(data2.begin(), data2.end(), [&gen]() {
++            return static_cast<uint8_t>(gen() & 0xFF);
++        });
++        
++        REQUIRE(producer.write(data2) == data2.size());
++        
++        // Only consumer1 is left to read it
++        auto read3 = consumer1.read(data2.size());
++        REQUIRE(read3 == data2);
++    }
++} 
+\ No newline at end of file
+diff --git a/tests/test_shm_ipc.cpp b/tests/test_shm_ipc.cpp
+new file mode 100644
+index 0000000..07a14be
+--- /dev/null
++++ b/tests/test_shm_ipc.cpp
+@@ -0,0 +1,634 @@
++#define CATCH_CONFIG_MAIN
++#include "shm_ipc_wrapper.h"
++#include <algorithm>
++#include <atomic>
++#include <catch2/catch.hpp>
++#include <chrono>
++#include <iomanip>
++#include <iostream>
++#include <numeric>
++#include <random>
++#include <thread>
++
++using namespace shm_ipc;
++
++TEST_CASE("SharedRingBuffer basic operations", "[shared_ringbuffer]") {
++  const std::string test_name = "test_basic_ops";
++  
++  // Randomize buffer size between 512 and 8192 bytes
++  std::random_device rd;
++  std::mt19937 gen(rd());
++  std::uniform_int_distribution<> buffer_size_dist(512, 8192);
++  const size_t buffer_size = buffer_size_dist(gen);
++  std::cout << "Basic ops test with buffer size: " << buffer_size << " bytes" << std::endl;
++
++  // Create a new shared memory buffer (producer)
++  SharedRingBuffer producer(test_name, buffer_size);
++  
++  // Also open a consumer to read data
++  auto consumer = SharedRingBuffer::open_consumer(test_name, 0);
++
++  SECTION("Buffer properties") {
++    REQUIRE(producer.name() == test_name);
++    REQUIRE(producer.buffer_size() >= buffer_size);
++    REQUIRE(producer.is_producer() == true);
++    REQUIRE(consumer.is_producer() == false);
++    REQUIRE(consumer.available() == 0);
++    REQUIRE(producer.free_space() > 0);
++  }
++
++  SECTION("Write and read data") {
++    // Generate random test data size between 1-100 bytes
++    std::uniform_int_distribution<> size_dist(1, 100);
++    size_t test_data_size = size_dist(gen);
++    
++    std::vector<uint8_t> test_data(test_data_size);
++    std::generate(test_data.begin(), test_data.end(), [&gen]() { 
++      return static_cast<uint8_t>(gen() & 0xFF); 
++    });
++
++    size_t written = producer.write(test_data);
++    REQUIRE(written == test_data.size());
++    REQUIRE(consumer.available() == test_data.size());
++
++    auto read_data = consumer.read(test_data_size + 10); // Try to read more than available
++    REQUIRE(read_data.size() == test_data.size());
++    REQUIRE(read_data == test_data);
++    REQUIRE(consumer.available() == 0);
++  }
++
++  SECTION("Multiple write and read operations") {
++    // Generate different sized random data chunks
++    std::uniform_int_distribution<> size_dist(10, 100);
++    std::vector<uint8_t> data1(size_dist(gen));
++    std::vector<uint8_t> data2(size_dist(gen));
++    
++    std::generate(data1.begin(), data1.end(), [&gen]() { 
++      return static_cast<uint8_t>(gen() & 0xFF); 
++    });
++    std::generate(data2.begin(), data2.end(), [&gen]() { 
++      return static_cast<uint8_t>(gen() & 0xFF); 
++    });
++
++    producer.write(data1);
++    producer.write(data2);
++
++    REQUIRE(consumer.available() == data1.size() + data2.size());
++
++    auto read1 = consumer.read(data1.size());
++    REQUIRE(read1 == data1);
++
++    auto read2 = consumer.read(data2.size());
++    REQUIRE(read2 == data2);
++
++    REQUIRE(consumer.available() == 0);
++  }
++
++  SECTION("Buffer wrapping") {
++    // Fill most of the buffer with random percentage
++    std::uniform_int_distribution<> fill_pct_dist(40, 70);
++    int fill_percentage = fill_pct_dist(gen);
++    size_t first_chunk_size = buffer_size * fill_percentage / 100;
++    
++    std::vector<uint8_t> large_data(first_chunk_size);
++    std::generate(large_data.begin(), large_data.end(), [&gen]() {
++      return static_cast<uint8_t>(gen() & 0xFF);
++    });
++
++    producer.write(large_data);
++    auto read_large = consumer.read(large_data.size());
++    REQUIRE(read_large == large_data);
++
++    // Write more data to force wrapping with a random size
++    std::uniform_int_distribution<> wrap_size_dist(
++        buffer_size/8, buffer_size/3);  // Between 1/8 and 1/3 of buffer size
++    size_t wrap_data_size = wrap_size_dist(gen);
++    
++    std::vector<uint8_t> wrap_data(wrap_data_size);
++    std::generate(wrap_data.begin(), wrap_data.end(), [&gen]() {
++      return static_cast<uint8_t>(gen() & 0xFF);
++    });
++
++    // Do multiple writes that will eventually force a wrap
++    for (int i = 0; i < 3; i++) {
++      producer.write(wrap_data);
++      auto read_wrap = consumer.read(wrap_data.size());
++      REQUIRE(read_wrap == wrap_data);
++    }
++    
++    // Test near-exact buffer size to check boundary conditions
++    std::uniform_int_distribution<> boundary_dist(
++        buffer_size - 20, buffer_size + 20);
++    size_t boundary_size = std::min(static_cast<size_t>(boundary_dist(gen)), buffer_size - 1);
++    
++    std::vector<uint8_t> boundary_data(boundary_size);
++    std::generate(boundary_data.begin(), boundary_data.end(), [&gen]() {
++      return static_cast<uint8_t>(gen() & 0xFF);
++    });
++    
++    // This should either succeed if space is available or fail gracefully
++    size_t written = producer.write(boundary_data);
++    if (written > 0) {
++      auto read_boundary = consumer.read(written);
++      REQUIRE(read_boundary.size() == written);
++      for (size_t i = 0; i < written; i++) {
++        REQUIRE(read_boundary[i] == boundary_data[i]);
++      }
++    }
++  }
++}
++
++TEST_CASE("SharedRingBuffer IPC between processes",
++          "[shared_ringbuffer][ipc]") {
++  const std::string test_name = "test_ipc";
++  const size_t buffer_size = 4096;
++
++  SECTION("Consumer opens existing buffer") {
++    // Create the buffer first
++    {
++      SharedRingBuffer producer(test_name, buffer_size);
++      std::vector<uint8_t> data = {1, 2, 3, 4, 5};
++      producer.write(data);
++    }
++
++    // Now open it as a consumer
++    SharedRingBuffer consumer = SharedRingBuffer::open(test_name);
++    REQUIRE(consumer.available() == 5);
++    auto data = consumer.read(5);
++    REQUIRE(data == std::vector<uint8_t>{1, 2, 3, 4, 5});
++  }
++}
++
++TEST_CASE("SharedRingBuffer performance", "[shared_ringbuffer][performance]") {
++  const std::string test_name = "test_perf";
++  // Randomize buffer size between 512KB and 2MB
++  std::random_device rd;
++  std::mt19937 gen(rd());
++  std::uniform_int_distribution<> buffer_size_dist(512 * 1024, 2 * 1024 * 1024);
++  const size_t buffer_size = buffer_size_dist(gen); // Random buffer size
++  std::cout << "Using random buffer size: " << (buffer_size / 1024) << " KB" << std::endl;
++
++  SharedRingBuffer producer(test_name, buffer_size);
++  auto consumer = SharedRingBuffer::open(test_name);
++
++  SECTION("Large data transfer") {
++    const size_t total_data = 10 * 1024 * 1024; // 10MB
++    // Random chunk sizes between 16KB and 128KB
++    std::uniform_int_distribution<> chunk_dist(16 * 1024, 128 * 1024);
++
++    // Random delay between operations (0-5ms)
++    std::uniform_int_distribution<> delay_dist(0, 5);
++    
++    // Random data distribution
++    std::uniform_int_distribution<> distrib(0, 255);
++
++    auto start = std::chrono::high_resolution_clock::now();
++
++    // Write data in chunks
++    size_t total_written = 0;
++    while (total_written < total_data) {
++      // Randomize chunk size for each write
++      size_t chunk_size = chunk_dist(gen);
++      std::vector<uint8_t> chunk(chunk_size);
++      
++      // Fill with random data
++      std::generate(chunk.begin(), chunk.end(),
++                  [&]() { return static_cast<uint8_t>(distrib(gen)); });
++
++      size_t written = producer.write(chunk);
++      total_written += written;
++
++      // Random delay to simulate real-world conditions
++      if (delay_dist(gen) == 0) { // 20% chance of delay
++        std::this_thread::sleep_for(std::chrono::milliseconds(delay_dist(gen)));
++      }
++
++      // Read the data back immediately
++      auto read_data = consumer.read(written);
++      REQUIRE(read_data.size() == written);
++      
++      // Random delay for reader too
++      if (delay_dist(gen) == 0) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(delay_dist(gen)));
++      }
++    }
++
++    auto end = std::chrono::high_resolution_clock::now();
++    auto duration =
++        std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
++            .count();
++
++    // Calculate throughput in MB/s
++    double throughput =
++        (static_cast<double>(total_written) / (1024.0 * 1024.0)) /
++        (duration / 1000.0);
++
++    std::cout << "Throughput: " << throughput << " MB/s" << std::endl;
++    REQUIRE(throughput > 0);
++  }
++}
++
++TEST_CASE("SharedRingBuffer basic producer-consumer", "[shared_ringbuffer]") {
++  // Skip the more complex multi-threaded test and focus on basic functionality
++  const std::string test_name = "test_simple_pc";
++  const size_t buffer_size = 1024;
++
++  SharedRingBuffer producer(test_name, buffer_size);
++  auto consumer = SharedRingBuffer::open(test_name);
++
++  // Write a series of messages with varying sizes
++  // This will ensure we can detect if messages are being concatenated
++  const int num_messages = 5;
++  for (int i = 0; i < num_messages; i++) {
++    // Each message has a different size (i+1 bytes)
++    std::vector<uint8_t> data(i + 1, static_cast<uint8_t>(i + 1));
++    producer.write(data);
++
++    // Debug print
++    std::cout << "Wrote message " << i << " with size " << data.size()
++              << std::endl;
++  }
++
++  // Read back all messages
++  int messages_read = 0;
++  for (int i = 0; i < num_messages; i++) {
++    // Read one byte at a time to ensure we don't accidentally merge messages
++    auto data = consumer.read(1);
++    if (!data.empty()) {
++      // The value should match the message number + 1
++      REQUIRE(data[0] == static_cast<uint8_t>(i + 1));
++
++      // For messages of size > 1, read the rest
++      if (i > 0) {
++        auto rest = consumer.read(i);
++        for (size_t j = 0; j < rest.size(); j++) {
++          REQUIRE(rest[j] == static_cast<uint8_t>(i + 1));
++        }
++      }
++
++      messages_read++;
++      std::cout << "Read message " << i << " with value " << (int)data[0]
++                << std::endl;
++    }
++  }
++
++  // All messages should be read
++  REQUIRE(messages_read == num_messages);
++  REQUIRE(consumer.available() == 0);
++}
++
++TEST_CASE("SharedRingBuffer latency benchmark",
++          "[shared_ringbuffer][benchmark][latency]") {
++  const std::string test_name = "test_latency";
++  // Randomize buffer size between 256KB and 4MB
++  std::random_device rd;
++  std::mt19937 gen(rd());
++  std::uniform_int_distribution<> buffer_size_dist(256 * 1024, 4 * 1024 * 1024);
++  const size_t buffer_size = buffer_size_dist(gen);
++  std::cout << "\nUsing random buffer size for latency test: " << (buffer_size / 1024) << " KB" << std::endl;
++
++  SharedRingBuffer producer(test_name, buffer_size);
++  auto consumer = SharedRingBuffer::open(test_name);
++
++  // Prepare test data with different sizes - now include some irregular sizes
++  std::vector<size_t> message_sizes = {8, 64, 256, 1024, 4096, 16384};
++  
++  // Add some random odd-sized messages to test boundary conditions
++  std::uniform_int_distribution<> odd_size_dist(1, 32 * 1024);
++  for (int i = 0; i < 3; i++) {
++    message_sizes.push_back(odd_size_dist(gen));
++  }
++  
++  // Randomize number of iterations between 500-1500
++  std::uniform_int_distribution<> iter_dist(500, 1500);
++  const int iterations = iter_dist(gen);
++  std::cout << "Running " << iterations << " iterations per message size" << std::endl;
++
++  std::cout << "\nLatency Benchmark Results:" << std::endl;
++  std::cout << "------------------------" << std::endl;
++  std::cout << "Message Size | Write Latency (μs) | Read Latency (μs) | "
++               "Round-trip Latency (μs)"
++            << std::endl;
++  std::cout << "------------|-------------------|------------------|-----------"
++               "-------------"
++            << std::endl;
++
++  // Random pattern generation strategy
++  std::uniform_int_distribution<> pattern_dist(0, 3);
++
++  for (size_t msg_size : message_sizes) {
++    std::vector<uint8_t> data(msg_size);
++    
++    // Choose a random data pattern
++    int pattern = pattern_dist(gen);
++    switch (pattern) {
++      case 0: // Sequential values
++        std::iota(data.begin(), data.end(), 0);
++        break;
++      case 1: // All same value
++        std::fill(data.begin(), data.end(), 42);
++        break;
++      case 2: // Random values
++        std::generate(data.begin(), data.end(), [&]() { return static_cast<uint8_t>(gen() & 0xFF); });
++        break;
++      case 3: // Alternating values
++        for (size_t i = 0; i < data.size(); i++) {
++          data[i] = (i % 2) ? 0xAA : 0x55;
++        }
++        break;
++    }
++    std::cout << "Testing " << msg_size << " bytes with pattern type " << pattern << std::endl;
++
++    // Write latency measurements
++    std::vector<double> write_latencies;
++    std::vector<double> read_latencies;
++    std::vector<double> round_trip_latencies;
++
++    for (int i = 0; i < iterations; i++) {
++      // Occasionally inject a small delay to simulate system load
++      if (i % 50 == 0) {
++        std::uniform_int_distribution<> load_delay_dist(1, 10);
++        std::this_thread::sleep_for(std::chrono::milliseconds(load_delay_dist(gen)));
++      }
++
++      // Measure write latency
++      auto write_start = std::chrono::high_resolution_clock::now();
++      producer.write(data);
++      auto write_end = std::chrono::high_resolution_clock::now();
++      auto write_duration =
++          std::chrono::duration_cast<std::chrono::nanoseconds>(write_end -
++                                                               write_start)
++              .count() /
++          1000.0; // μs
++      write_latencies.push_back(write_duration);
++
++      // Measure read latency
++      auto read_start = std::chrono::high_resolution_clock::now();
++      auto received = consumer.read(msg_size);
++      auto read_end = std::chrono::high_resolution_clock::now();
++      auto read_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                               read_end - read_start)
++                               .count() /
++                           1000.0; // μs
++      read_latencies.push_back(read_duration);
++
++      // Round-trip latency
++      round_trip_latencies.push_back(write_duration + read_duration);
++
++      // Verify data integrity
++      REQUIRE(received.size() == data.size());
++      if (!received.empty()) {
++        REQUIRE(received == data);
++      }
++    }
++
++    // Calculate average latencies
++    auto calc_avg = [](const std::vector<double> &values) -> double {
++      return std::accumulate(values.begin(), values.end(), 0.0) / values.size();
++    };
++
++    double avg_write_latency = calc_avg(write_latencies);
++    double avg_read_latency = calc_avg(read_latencies);
++    double avg_round_trip = calc_avg(round_trip_latencies);
++
++    // Calculate minimum latencies
++    auto min_write_latency =
++        *std::min_element(write_latencies.begin(), write_latencies.end());
++    auto min_read_latency =
++        *std::min_element(read_latencies.begin(), read_latencies.end());
++    auto min_round_trip = *std::min_element(round_trip_latencies.begin(),
++                                           round_trip_latencies.end());
++
++    // Print results
++    std::cout << std::setw(12) << msg_size << " | " << std::setw(19)
++              << std::fixed << std::setprecision(3) << avg_write_latency
++              << " | " << std::setw(18) << avg_read_latency << " | "
++              << std::setw(24) << avg_round_trip << std::endl;
++    
++    // Also print minimum latencies (often more relevant for benchmarks)
++    std::cout << "            | " << std::setw(19) << std::fixed 
++              << std::setprecision(3) << min_write_latency << " (min)"
++              << " | " << std::setw(18) << min_read_latency << " (min)"
++              << " | " << std::setw(24) << min_round_trip << " (min)" << std::endl;
++  }
++
++  // Verify the benchmark is meaningful
++  REQUIRE(consumer.available() == 0);
++}
++
++TEST_CASE("SharedRingBuffer message framing", "[shared_ringbuffer][messaging]") {
++  const std::string test_name = "test_messaging";
++  
++  // Randomize buffer size between 1KB and 32KB
++  std::random_device rd;
++  std::mt19937 gen(rd());
++  std::uniform_int_distribution<> buffer_size_dist(1024, 32 * 1024);
++  const size_t buffer_size = buffer_size_dist(gen);
++  
++  std::cout << "Message framing test with buffer size: " << buffer_size << " bytes" << std::endl;
++  
++  // Create producer and consumer
++  SharedRingBuffer producer(test_name, buffer_size);
++  auto consumer = SharedRingBuffer::open_consumer(test_name, 0);
++  
++  SECTION("Basic message framing") {
++    // Test basic write/read message
++    std::vector<uint8_t> test_message = {1, 2, 3, 4, 5};
++    
++    REQUIRE(producer.write_message(test_message));
++    
++    // Check if message is available
++    auto msg_size_opt = consumer.message_available();
++    REQUIRE(msg_size_opt.has_value());
++    REQUIRE(msg_size_opt.value() == test_message.size());
++    
++    // Read the message
++    auto received = consumer.read_message();
++    REQUIRE(received == test_message);
++    
++    // No more messages available
++    REQUIRE_FALSE(consumer.message_available().has_value());
++  }
++  
++  SECTION("Multiple messages") {
++    // Write multiple messages of different sizes
++    std::vector<std::vector<uint8_t>> messages;
++    
++    // Generate 5 messages with random sizes (smaller max size to ensure it fits in buffer)
++    std::uniform_int_distribution<> msg_size_dist(10, 500);
++    for (int i = 0; i < 5; i++) {
++      size_t size = msg_size_dist(gen);
++      std::vector<uint8_t> msg(size);
++      
++      // Fill with pattern where first byte is the message number
++      msg[0] = static_cast<uint8_t>(i);
++      for (size_t j = 1; j < size; j++) {
++        msg[j] = static_cast<uint8_t>(gen() & 0xFF);
++      }
++      
++      messages.push_back(msg);
++      
++      // Write message
++      REQUIRE(producer.write_message(msg));
++      
++      std::cout << "Wrote message " << i << " with size " << size << std::endl;
++    }
++    
++    // Read all messages and verify
++    for (int i = 0; i < 5; i++) {
++      // Check if message is available
++      auto msg_size_opt = consumer.message_available();
++      REQUIRE(msg_size_opt.has_value());
++      REQUIRE(msg_size_opt.value() == messages[i].size());
++      
++      // Read message
++      auto received = consumer.read_message();
++      REQUIRE(received.size() == messages[i].size());
++      REQUIRE(received[0] == static_cast<uint8_t>(i)); // Check message identifier
++      REQUIRE(received == messages[i]);
++      
++      std::cout << "Read message " << i << " with size " << received.size() << std::endl;
++    }
++    
++    // No more messages
++    REQUIRE_FALSE(consumer.message_available().has_value());
++  }
++  
++  SECTION("Message wrapping") {
++    // Write a message that will wrap around the buffer
++    
++    // First fill most of the buffer (80%) with a regular write to advance the write pointer
++    size_t filler_size = buffer_size * 0.8;
++    std::vector<uint8_t> filler(filler_size);
++    std::generate(filler.begin(), filler.end(), [&gen]() { 
++      return static_cast<uint8_t>(gen() & 0xFF); 
++    });
++    
++    producer.write(filler);
++    
++    // Now read the filler to free up space
++    consumer.read(filler.size());
++    
++    // Generate a message that's 50% of buffer size
++    size_t message_size = buffer_size * 0.5;
++    std::vector<uint8_t> wrapped_message(message_size);
++    std::generate(wrapped_message.begin(), wrapped_message.end(), [&gen]() { 
++      return static_cast<uint8_t>(gen() & 0xFF); 
++    });
++    
++    // Write the message - this should wrap around the buffer
++    REQUIRE(producer.write_message(wrapped_message));
++    
++    // Read the message
++    auto received = consumer.read_message();
++    REQUIRE(received.size() == wrapped_message.size());
++    REQUIRE(received == wrapped_message);
++  }
++  
++  SECTION("Maximum sized message") {
++    // Create a message that's reasonably large but smaller than buffer size
++    // The header is 4 bytes, and we need to leave space to avoid buffer issues
++    size_t max_message_size = std::min(buffer_size / 2, static_cast<size_t>(4096));
++    std::vector<uint8_t> large_message(max_message_size);
++    
++    // Fill with pattern
++    for (size_t i = 0; i < max_message_size; i++) {
++      large_message[i] = static_cast<uint8_t>(i & 0xFF);
++    }
++    
++    // Write the message
++    REQUIRE(producer.write_message(large_message));
++    
++    // Read the message
++    auto received = consumer.read_message();
++    REQUIRE(received.size() == large_message.size());
++    
++    // Verify pattern
++    for (size_t i = 0; i < max_message_size; i++) {
++      REQUIRE(received[i] == static_cast<uint8_t>(i & 0xFF));
++    }
++  }
++  
++  SECTION("Interleaved raw and message reads/writes") {
++    // Test mixing regular reads/writes with message reads/writes
++    
++    // Write a raw chunk of data
++    std::vector<uint8_t> raw_data = {10, 20, 30, 40, 50};
++    producer.write(raw_data);
++    
++    // Write a message
++    std::vector<uint8_t> message = {60, 70, 80, 90, 100};
++    REQUIRE(producer.write_message(message));
++    
++    // Read raw data
++    auto received_raw = consumer.read(raw_data.size());
++    REQUIRE(received_raw == raw_data);
++    
++    // Read message
++    auto received_msg = consumer.read_message();
++    REQUIRE(received_msg == message);
++    
++    // Do it again in reverse order
++    std::vector<uint8_t> message2 = {1, 3, 5, 7, 9};
++    REQUIRE(producer.write_message(message2));
++    
++    std::vector<uint8_t> raw_data2 = {2, 4, 6, 8, 10};
++    producer.write(raw_data2);
++    
++    // Read message first
++    auto received_msg2 = consumer.read_message();
++    REQUIRE(received_msg2 == message2);
++    
++    // Read raw data
++    auto received_raw2 = consumer.read(raw_data2.size());
++    REQUIRE(received_raw2 == raw_data2);
++  }
++  
++  SECTION("Random-sized messages") {
++    // Generate and write random-sized messages
++    std::uniform_int_distribution<> count_dist(5, 10);
++    int message_count = count_dist(gen);
++    
++    std::vector<std::vector<uint8_t>> messages;
++    
++    for (int i = 0; i < message_count; i++) {
++      // Random message size from 1 byte to 5% of buffer (to ensure it fits)
++      std::uniform_int_distribution<> size_dist(1, std::min(static_cast<size_t>(buffer_size / 20), static_cast<size_t>(500)));
++      size_t size = size_dist(gen);
++      
++      std::vector<uint8_t> msg(size);
++      std::generate(msg.begin(), msg.end(), [&gen]() { 
++        return static_cast<uint8_t>(gen() & 0xFF); 
++      });
++      
++      // Mark first byte with message number so we can verify order
++      if (!msg.empty()) {
++        msg[0] = static_cast<uint8_t>(i & 0xFF);
++      }
++      
++      messages.push_back(msg);
++      
++      // Write message
++      REQUIRE(producer.write_message(msg));
++    }
++    
++    std::cout << "Wrote " << message_count << " random-sized messages" << std::endl;
++    
++    // Read all messages back
++    for (int i = 0; i < message_count; i++) {
++      auto msg_size_opt = consumer.message_available();
++      REQUIRE(msg_size_opt.has_value());
++      REQUIRE(msg_size_opt.value() == messages[i].size());
++      
++      auto received = consumer.read_message();
++      REQUIRE(received.size() == messages[i].size());
++      if (!received.empty()) {
++        REQUIRE(received[0] == static_cast<uint8_t>(i & 0xFF));
++      }
++      REQUIRE(received == messages[i]);
++    }
++    
++    // No more messages
++    REQUIRE_FALSE(consumer.message_available().has_value());
++  }
++}
+\ No newline at end of file
+-- 
+2.43.0
+

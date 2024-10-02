@@ -1,0 +1,437 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..8735362
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,64 @@
++cmake_minimum_required(VERSION 3.10)
++project(rocksdb_blob_example C CXX)
++
++set(CMAKE_C_STANDARD 11)
++set(CMAKE_C_STANDARD_REQUIRED True)
++
++# Add option to force compile RocksDB from source
++option(FORCE_COMPILE_ROCKSDB "Force compilation of RocksDB from source" OFF)
++
++# First try to find system-installed RocksDB if not forcing compilation
++if(NOT FORCE_COMPILE_ROCKSDB)
++    find_package(RocksDB QUIET)
++else()
++    set(RocksDB_FOUND FALSE)
++    message(STATUS "Forcing compilation of RocksDB from source as requested")
++endif()
++
++if(NOT RocksDB_FOUND)
++    message(STATUS "System RocksDB not found, downloading and building from source")
++    # Set RocksDB options before including it
++    set(WITH_GFLAGS OFF CACHE BOOL "build with gflags")
++    set(WITH_TESTS OFF CACHE BOOL "build with tests")
++    set(WITH_TOOLS OFF CACHE BOOL "build with tools")
++    set(WITH_SNAPPY ON CACHE BOOL "build with snappy")
++
++    include(FetchContent)
++    FetchContent_Declare(
++        rocksdb
++        URL https://github.com/facebook/rocksdb/archive/refs/tags/v10.0.1.zip
++        URL_HASH SHA1=59334fa9c4194149b18b5eb6faba37fb04d431e8
++        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
++        CMAKE_ARGS 
++            -DCMAKE_BUILD_TYPE=Release
++    )
++
++    FetchContent_MakeAvailable(rocksdb)
++    # Don't use find_package after FetchContent_MakeAvailable
++    # The target 'rocksdb' is already available
++    
++    # Set variable to indicate we're using built rocksdb
++    set(USING_BUILT_ROCKSDB TRUE)
++else()
++    message(STATUS "Using system-installed RocksDB")
++    set(USING_BUILT_ROCKSDB FALSE)
++endif()
++
++# Add the executables
++add_executable(rocksdb_writer main.cpp)
++add_executable(rocksdb_reader reader.cpp)
++
++# Link against the RocksDB library and include directories
++if(USING_BUILT_ROCKSDB)
++    target_link_libraries(rocksdb_writer PRIVATE rocksdb)
++    target_link_libraries(rocksdb_reader PRIVATE rocksdb)
++else()
++    target_link_libraries(rocksdb_writer PRIVATE RocksDB::rocksdb)
++    target_link_libraries(rocksdb_reader PRIVATE RocksDB::rocksdb)
++endif()
++
++# Optional: Add compiler flags if needed, e.g., for optimization
++# target_compile_options(rocksdb_writer PRIVATE -O3)
++# target_compile_options(rocksdb_reader PRIVATE -O3)
++
++message(STATUS "RocksDB configuration complete")
+\ No newline at end of file
+diff --git a/a.py b/a.py
+new file mode 100644
+index 0000000..ec440ad
+--- /dev/null
++++ b/a.py
+@@ -0,0 +1,40 @@
++from rocksdict import Rdict
++import numpy as np
++import pandas as pd
++
++path = str("./test_dict")
++
++# create a Rdict with default options at `path`
++db = Rdict(path)
++db[1.0] = 1
++db["huge integer"] = 2343546543243564534233536434567543
++db["good"] = True
++db["bytes"] = b"bytes"
++db["this is a list"] = [1, 2, 3]
++db["store a dict"] = {0: 1}
++db[b"numpy"] = np.array([1, 2, 3])
++db["a table"] = pd.DataFrame({"a": [1, 2], "b": [2, 1]})
++
++# reopen Rdict from disk
++db.close()
++db = Rdict(path)
++assert db[1.0] == 1
++assert db["huge integer"] == 2343546543243564534233536434567543
++assert db["good"] == True
++assert db["bytes"] == b"bytes"
++assert db["this is a list"] == [1, 2, 3]
++assert db["store a dict"] == {0: 1}
++assert np.all(db[b"numpy"] == np.array([1, 2, 3]))
++assert np.all(db["a table"] == pd.DataFrame({"a": [1, 2], "b": [2, 1]}))
++
++# iterate through all elements
++for k, v in db.items():
++    print(f"{k} -> {v}")
++
++# batch get:
++print(db[["good", "bad", 1.0]])
++# [True, False, 1]
++
++# delete Rdict from dict
++db.close()
++Rdict.destroy(path)
+diff --git a/a.sh b/a.sh
+new file mode 100755
+index 0000000..5bd914b
+--- /dev/null
++++ b/a.sh
+@@ -0,0 +1,28 @@
++#!/bin/bash
++set -e  # Exit on error
++
++# rm -rf build
++# Create build directory
++mkdir -p build
++
++# Configure with forced RocksDB compilation
++echo "Configuring build with FORCE_COMPILE_ROCKSDB=ON..."
++
++cmake -S. -B build -DFORCE_COMPILE_ROCKSDB=ON -G Ninja
++
++# Build the project
++echo "Building project..."
++cmake --build build
++
++echo "Build completed successfully!"
++
++# Check if executables were created
++if [ -f "build/rocksdb_writer" ] && [ -f "build/rocksdb_reader" ]; then
++  echo "✅ Success: Both executables were created"
++else
++  echo "❌ Error: Executables were not created"
++  exit 1
++fi
++
++./build/rocksdb_writer
++./build/rocksdb_reader 5000 100
+\ No newline at end of file
+diff --git a/main.cpp b/main.cpp
+new file mode 100644
+index 0000000..51a0e9d
+--- /dev/null
++++ b/main.cpp
+@@ -0,0 +1,155 @@
++#include <rocksdb/c.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h> // For seeding random
++
++// --- Configuration ---
++const char *DB_PATH = "/tmp/rocksdb_blob_example";
++const int NUM_KEYS_TO_WRITE = 10000; // Number of blob entries to write
++// const size_t BLOB_SIZE = 128 * 1024; // 128 KB blobs
++const size_t BLOB_SIZE = 1 * 1024; // 1 KB blobs
++const int BATCH_SIZE = 8192;          // Write in batches of 100
++const int DISABLE_WAL = 1; // 1 to disable WAL (faster, less safe), 0 to enable
++const size_t MIN_BLOB_SIZE = 16 * 1024; // Values >= 16KB go to blob files
++// --- End Configuration ---
++
++// Helper function to check RocksDB errors
++void check_rocksdb_error(char *errptr, const char *message) {
++  if (errptr != NULL) {
++    fprintf(stderr, "Error: %s: %s\n", message, errptr);
++    free(errptr); // Important: Free the error message memory
++    exit(1);
++  }
++}
++
++int main() {
++  rocksdb_t *db;
++  rocksdb_options_t *options;
++  rocksdb_writeoptions_t *write_options;
++  char *err = NULL;
++  char key_buffer[64];
++  char *value_buffer = NULL;
++
++  printf("Starting RocksDB Blob Write Example...\n");
++  printf("Database path: %s\n", DB_PATH);
++  printf("Writing %d keys with blob size %zu bytes.\n", NUM_KEYS_TO_WRITE,
++         BLOB_SIZE);
++  printf("Batch size: %d\n", BATCH_SIZE);
++  printf("Min blob size for BlobDB: %zu bytes\n", MIN_BLOB_SIZE);
++  printf("Write Ahead Log (WAL): %s\n",
++         DISABLE_WAL ? "DISABLED (Max Speed / Less Safe!)" : "ENABLED (Safer)");
++
++  // --- Prepare RocksDB Options ---
++  options = rocksdb_options_create();
++  // Increase parallelism (adjust based on your CPU cores)
++  rocksdb_options_increase_parallelism(options, 4);
++  // Optimize level 0 file num compaction trigger (can help with write stalls)
++  rocksdb_options_optimize_level_style_compaction(
++      options, 512 * 1024 * 1024); // 512MB memory budget
++  // Create DB if it doesn't exist
++  rocksdb_options_set_create_if_missing(options, 1);
++
++  // Tune memtable/write buffer size (larger buffer can absorb write bursts)
++  rocksdb_options_set_write_buffer_size(options,
++                                        128 * 1024 * 1024); // 128MB memtable
++  rocksdb_options_set_max_write_buffer_number(
++      options, 4); // Allow more memtables in memory
++
++  // Disable compression for potential raw speed gain (if CPU bound or data
++  // incompressible)
++  rocksdb_options_set_compression(options, rocksdb_no_compression);
++
++  // --- Enable and Configure BlobDB ---
++  rocksdb_options_set_enable_blob_files(options, 1);
++  rocksdb_options_set_min_blob_size(options, MIN_BLOB_SIZE);
++  // Optional: Set blob file size, compression for blobs, enable GC etc.
++  // rocksdb_options_set_blob_file_size(options, 256 * 1024 * 1024); // 256MB
++  // blob files rocksdb_options_set_blob_compression_type(options,
++  // rocksdb_lz4_compression);
++  // rocksdb_options_set_enable_blob_garbage_collection(options, 1);
++
++  // --- Prepare Write Options ---
++  write_options = rocksdb_writeoptions_create();
++  if (DISABLE_WAL) {
++    // Disabling WAL significantly increases write speed but risks data loss on
++    // crash
++    rocksdb_writeoptions_disable_WAL(write_options, 1);
++    // Optional: Sync writes aren't needed if WAL is off
++    // rocksdb_writeoptions_set_sync(write_options, 0);
++  } else {
++    // Optional: If WAL is enabled, you might consider disabling sync for speed,
++    // but this still risks losing data in the OS buffer cache on power loss.
++    // rocksdb_writeoptions_set_sync(write_options, 0);
++  }
++
++  // --- Open DB ---
++  printf("Opening database...\n");
++  db = rocksdb_open(options, DB_PATH, &err);
++  check_rocksdb_error(err, "DB Open failed");
++  err = NULL; // Reset error pointer
++
++  // --- Allocate reusable buffer for blob data ---
++  value_buffer = (char *)malloc(BLOB_SIZE);
++  if (!value_buffer) {
++    fprintf(stderr, "Failed to allocate memory for value buffer\n");
++    exit(1);
++  }
++  // Fill with some arbitrary data (e.g., pseudo-random bytes)
++  srand(time(NULL));
++  for (size_t i = 0; i < BLOB_SIZE; ++i) {
++    value_buffer[i] = rand() % 256;
++  }
++
++  // --- Write Data in Batches ---
++  printf("Writing data...\n");
++  rocksdb_writebatch_t *batch = NULL;
++  for (int i = 0; i < NUM_KEYS_TO_WRITE; ++i) {
++    // Create a new batch every BATCH_SIZE iterations
++    if (i % BATCH_SIZE == 0) {
++      // Write the previous batch if it exists
++      if (batch != NULL) {
++        rocksdb_write(db, write_options, batch, &err);
++        check_rocksdb_error(err, "Write batch failed");
++        err = NULL;
++        rocksdb_writebatch_destroy(batch); // Destroy the old batch
++      }
++      // Create a new batch
++      batch = rocksdb_writebatch_create();
++      if (i + BATCH_SIZE > NUM_KEYS_TO_WRITE) {
++        printf("Writing final batch (%d keys)...\n", NUM_KEYS_TO_WRITE - i);
++      } else {
++        printf("Writing batch starting at key %d...\n", i);
++      }
++    }
++
++    // Generate key
++    snprintf(key_buffer, sizeof(key_buffer), "key%08d", i);
++
++    // Add Put operation to the current batch
++    // Using value_buffer directly. For varying data, fill it here.
++    rocksdb_writebatch_put(batch, key_buffer, strlen(key_buffer), value_buffer,
++                           BLOB_SIZE);
++  }
++
++  // Write the last remaining batch
++  if (batch != NULL) {
++    rocksdb_write(db, write_options, batch, &err);
++    check_rocksdb_error(err, "Final write batch failed");
++    err = NULL;
++    rocksdb_writebatch_destroy(batch);
++    batch = NULL;
++  }
++
++  printf("Finished writing data.\n");
++
++  // --- Cleanup ---
++  printf("Cleaning up resources...\n");
++  free(value_buffer);
++  rocksdb_writeoptions_destroy(write_options);
++  rocksdb_options_destroy(options);
++  rocksdb_close(db);
++
++  printf("Done.\n");
++  return 0;
++}
+\ No newline at end of file
+diff --git a/reader.cpp b/reader.cpp
+new file mode 100644
+index 0000000..e7dc11f
+--- /dev/null
++++ b/reader.cpp
+@@ -0,0 +1,78 @@
++#include <rocksdb/c.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++// Configuration - must match the writer
++const char *DB_PATH = "/tmp/rocksdb_blob_example";
++
++// Helper function to check RocksDB errors
++void check_rocksdb_error(char *errptr, const char *message) {
++  if (errptr != NULL) {
++    fprintf(stderr, "Error: %s: %s\n", message, errptr);
++    free(errptr);
++    exit(1);
++  }
++}
++
++int main(int argc, char *argv[]) {
++  rocksdb_t *db;
++  rocksdb_options_t *options;
++  rocksdb_readoptions_t *read_options;
++  char *err = NULL;
++  char key_buffer[64];
++  
++  int start_key = 0;
++  int num_keys = 10;
++  
++  // Parse command line arguments if provided
++  if (argc > 1) start_key = atoi(argv[1]);
++  if (argc > 2) num_keys = atoi(argv[2]);
++  
++  printf("Reading from RocksDB at %s\n", DB_PATH);
++  printf("Starting at key %d, reading %d keys\n", start_key, num_keys);
++
++  // Create options
++  options = rocksdb_options_create();
++  read_options = rocksdb_readoptions_create();
++  
++  // Open the database
++  db = rocksdb_open(options, DB_PATH, &err);
++  check_rocksdb_error(err, "DB Open failed");
++  
++  // Read and print keys
++  for (int i = start_key; i < start_key + num_keys; i++) {
++    size_t val_len;
++    
++    // Format key the same way as in the writer
++    snprintf(key_buffer, sizeof(key_buffer), "key%08d", i);
++    
++    // Read the value
++    char *value = rocksdb_get(db, read_options, key_buffer, strlen(key_buffer), &val_len, &err);
++    check_rocksdb_error(err, "Read failed");
++    
++    if (value != NULL) {
++      printf("Key: %s, Value size: %zu bytes\n", key_buffer, val_len);
++      
++      // Print first few bytes as hex
++      printf("Value preview (first 16 bytes): ");
++      for (size_t j = 0; j < val_len && j < 16; j++) {
++        printf("%02x ", (unsigned char)value[j]);
++      }
++      printf("\n");
++      
++      // Free the value returned by RocksDB
++      free(value);
++    } else {
++      printf("Key %s not found\n", key_buffer);
++    }
++  }
++  
++  // Cleanup
++  rocksdb_readoptions_destroy(read_options);
++  rocksdb_options_destroy(options);
++  rocksdb_close(db);
++  
++  printf("Done.\n");
++  return 0;
++} 
+\ No newline at end of file
+diff --git a/reader.py b/reader.py
+new file mode 100644
+index 0000000..1e64212
+--- /dev/null
++++ b/reader.py
+@@ -0,0 +1,32 @@
++from rocksdict import Rdict, Options
++
++db_path = "/tmp/rocksdb_blob_example"
++db = Rdict(db_path, options=Options(raw_mode=True))
++
++# list column families
++cfs = Rdict.list_cf(db_path)
++print(cfs)
++
++# use one of the column families
++cf1 = db.get_column_family(cfs[0])
++
++# iterate through all key-value pairs in cf1
++print("key-value pairs")
++n = 10
++for k, v in cf1.items():
++    n -= 1
++    x = len(v)
++    print(f"{k} -> {x} bytes")
++    if n == 0:
++        break
++
++print("wide columns")
++
++# iterate through all wide columns in cf1
++n = 10
++for k, v in cf1.entities():
++    n -= 1
++    x = len(v[0][1])
++    print(f"{k} -> {x} bytes")
++    if n == 0:
++        break

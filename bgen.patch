@@ -1,0 +1,305 @@
+diff --git a/try_bgen/CMakeLists.txt b/try_bgen/CMakeLists.txt
+new file mode 100644
+index 0000000..6136f3b
+--- /dev/null
++++ b/try_bgen/CMakeLists.txt
+@@ -0,0 +1,32 @@
++cmake_minimum_required(VERSION 3.14)
++
++project(BGenBenchmark C CXX)
++
++include(FetchContent)
++
++# Fetch the bgen library
++FetchContent_Declare(
++  bgen
++  GIT_REPOSITORY https://github.com/tidwall/bgen.git
++  GIT_TAG main
++)
++FetchContent_MakeAvailable(bgen)
++
++# Fetch Catch2 for testing
++FetchContent_Declare(
++  Catch2
++  GIT_REPOSITORY https://github.com/catchorg/Catch2.git
++  GIT_TAG v3.8.1
++)
++FetchContent_MakeAvailable(Catch2)
++
++add_executable(bgen_example main.c)
++target_include_directories(bgen_example PRIVATE ${bgen_SOURCE_DIR})
++
++add_executable(bgen_benchmark benchmark.cpp)
++
++# Link Catch2 and bgen
++target_link_libraries(bgen_benchmark PRIVATE Catch2::Catch2WithMain)
++target_include_directories(bgen_benchmark PRIVATE ${bgen_SOURCE_DIR})
++# target_include_directories(bgen_benchmark PRIVATE ${catch2_SOURCE_DIR}/src)
++target_compile_options(bgen_benchmark PRIVATE -fpermissive)
+diff --git a/try_bgen/a.sh b/try_bgen/a.sh
+new file mode 100644
+index 0000000..17395d6
+--- /dev/null
++++ b/try_bgen/a.sh
+@@ -0,0 +1,14 @@
++#! /bin/bash
++set -ueo pipefail
++cd `dirname $0`
++
++# rm -rf build
++
++mkdir -p build
++
++cmake -B build -H. -G Ninja -DCMAKE_BUILD_TYPE=Release
++
++cmake --build build
++
++./build/bgen_example
++./build/bgen_benchmark --verbosity high
+diff --git a/try_bgen/benchmark.cpp b/try_bgen/benchmark.cpp
+new file mode 100644
+index 0000000..f0b5531
+--- /dev/null
++++ b/try_bgen/benchmark.cpp
+@@ -0,0 +1,204 @@
++#include <catch2/catch_all.hpp>
++#include <chrono>
++#include <iostream>
++#include <random>
++
++#define BGEN_NAME bt            // The namespace for the btree structure.
++#define BGEN_TYPE int           // The data type for all items in the btree.
++#define BGEN_LESS return a < b; // Comparison code for sorting items.
++#include "bgen.h"               // Include the bgen header.
++
++TEST_CASE("B-tree Insertion Performance", "[benchmark]") {
++  const int num_elements = 1000000; // 1 million elements for benchmarking.
++
++  // Set up random number generator with fixed seed for reproducibility
++  std::mt19937 rng(42); // Seed with a constant value
++  std::uniform_int_distribution<int> dist(1, INT_MAX - 1);
++
++  // Generate random values before timing to avoid including generation time
++  std::vector<int> random_values(num_elements);
++  for (int i = 0; i < num_elements; ++i) {
++    random_values[i] = dist(rng);
++  }
++
++  // Measure the time to insert elements into the B-tree
++  auto start = std::chrono::high_resolution_clock::now();
++
++  struct bt *tree = 0;
++  for (int i = 0; i < num_elements; ++i) {
++    bt_insert(&tree, random_values[i], 0, 0);
++  }
++
++  auto end = std::chrono::high_resolution_clock::now();
++  auto duration_ns =
++      std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
++  double ns_per_op = static_cast<double>(duration_ns) / num_elements;
++
++  std::cout << "Insertion performance: " << ns_per_op << " ns/op ("
++            << num_elements << " operations)" << std::endl;
++  REQUIRE(
++      ns_per_op <
++      2000.0); // Assert that insertion takes less than 2000 ns per operation
++}
++
++TEST_CASE("B-tree Sequential Insertion Performance using push_back",
++          "[benchmark]") {
++  const int num_elements = 1000000; // 1 million elements for benchmarking.
++
++  // Create ordered values for sequential insertion
++  std::vector<int> sequential_values(num_elements);
++  for (int i = 0; i < num_elements; ++i) {
++    sequential_values[i] = i;
++  }
++
++  // Measure the time to insert elements sequentially using push_back
++  auto start = std::chrono::high_resolution_clock::now();
++
++  struct bt *tree = 0;
++  for (int i = 0; i < num_elements; ++i) {
++    bt_push_back(&tree, sequential_values[i], 0);
++  }
++
++  auto end = std::chrono::high_resolution_clock::now();
++  auto duration_ns =
++      std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
++  double ns_per_op = static_cast<double>(duration_ns) / num_elements;
++
++  std::cout << "Sequential insertion using push_back: " << ns_per_op
++            << " ns/op (" << num_elements << " operations)" << std::endl;
++  REQUIRE(ns_per_op < 50.0); // Assert that sequential insertion is very fast
++                             // (under 50 ns per operation)
++}
++
++TEST_CASE("B-tree Retrieval Performance", "[benchmark]") {
++  const int num_elements = 1000000; // 1 million elements for benchmarking.
++
++  // Insert elements into the B-tree
++  struct bt *tree = 0;
++  for (int i = 0; i < num_elements; ++i) {
++    bt_insert(&tree, i, 0, 0);
++  }
++
++  // Measure the time to retrieve elements from the B-tree
++  auto start = std::chrono::high_resolution_clock::now();
++
++  struct bt_iter *iter;
++  bt_iter_init(&tree, &iter, 0);
++  for (bt_iter_scan(iter); bt_iter_valid(iter); bt_iter_next(iter)) {
++    int item;
++    bt_iter_item(iter, &item); // Fetch each item.
++  }
++
++  auto end = std::chrono::high_resolution_clock::now();
++  auto duration_ns =
++      std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
++  double ns_per_op = static_cast<double>(duration_ns) / num_elements;
++
++  std::cout << "Retrieval performance: " << ns_per_op << " ns/op ("
++            << num_elements << " operations)" << std::endl;
++  REQUIRE(
++      ns_per_op <
++      2000.0); // Assert that retrieval takes less than 2000 ns per operation
++}
++
++TEST_CASE("B-tree Deletion Performance", "[benchmark]") {
++  const int num_elements = 1000000; // 1 million elements for benchmarking.
++
++  // Set up random number generator with fixed seed for reproducibility
++  std::mt19937 rng(42); // Seed with a constant value
++  std::uniform_int_distribution<int> dist(1, INT_MAX - 1);
++
++  // Generate random values before timing to avoid including generation time
++  std::vector<int> random_values(num_elements);
++  for (int i = 0; i < num_elements; ++i) {
++    random_values[i] = dist(rng);
++  }
++
++  // Insert elements into the B-tree first
++  struct bt *tree = 0;
++  for (int i = 0; i < num_elements; ++i) {
++    bt_insert(&tree, random_values[i], 0, 0);
++  }
++
++  // Measure the time to delete elements from the B-tree
++  auto start = std::chrono::high_resolution_clock::now();
++
++  for (int i = 0; i < num_elements; ++i) {
++    int old_item;
++    bt_delete(&tree, random_values[i], &old_item, 0);
++  }
++
++  auto end = std::chrono::high_resolution_clock::now();
++  auto duration_ns =
++      std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
++  double ns_per_op = static_cast<double>(duration_ns) / num_elements;
++
++  std::cout << "Deletion performance: " << ns_per_op << " ns/op ("
++            << num_elements << " operations)" << std::endl;
++  REQUIRE(ns_per_op <
++          2000.0); // Assert that deletion takes less than 2000 ns per operation
++}
++
++TEST_CASE("B-tree Random vs Sequential Insertion Comparison", "[benchmark]") {
++  const int num_elements = 1000000; // 1 million elements for benchmarking.
++
++  // Set up random number generator with fixed seed for reproducibility
++  std::mt19937 rng(42); // Seed with a constant value
++  std::uniform_int_distribution<int> dist(1, INT_MAX - 1);
++
++  // Generate random values
++  std::vector<int> random_values(num_elements);
++  for (int i = 0; i < num_elements; ++i) {
++    random_values[i] = dist(rng);
++  }
++
++  // Generate sequential values
++  std::vector<int> sequential_values(num_elements);
++  for (int i = 0; i < num_elements; ++i) {
++    sequential_values[i] = i;
++  }
++
++  // Measure random insertion using bt_insert
++  auto start_random = std::chrono::high_resolution_clock::now();
++  struct bt *random_tree = 0;
++  for (int i = 0; i < num_elements; ++i) {
++    bt_insert(&random_tree, random_values[i], 0, 0);
++  }
++  auto end_random = std::chrono::high_resolution_clock::now();
++  auto duration_random_ns =
++      std::chrono::duration_cast<std::chrono::nanoseconds>(end_random -
++                                                           start_random)
++          .count();
++  double ns_per_op_random =
++      static_cast<double>(duration_random_ns) / num_elements;
++
++  // Measure sequential insertion using bt_push_back
++  auto start_sequential = std::chrono::high_resolution_clock::now();
++  struct bt *sequential_tree = 0;
++  for (int i = 0; i < num_elements; ++i) {
++    bt_push_back(&sequential_tree, sequential_values[i], 0);
++  }
++  auto end_sequential = std::chrono::high_resolution_clock::now();
++  auto duration_sequential_ns =
++      std::chrono::duration_cast<std::chrono::nanoseconds>(end_sequential -
++                                                           start_sequential)
++          .count();
++  double ns_per_op_sequential =
++      static_cast<double>(duration_sequential_ns) / num_elements;
++
++  std::cout << "Random insertion (bt_insert): " << ns_per_op_random
++            << " ns/op (" << num_elements << " operations)" << std::endl;
++  std::cout << "Sequential insertion (bt_push_back): " << ns_per_op_sequential
++            << " ns/op (" << num_elements << " operations)" << std::endl;
++  std::cout << "Performance improvement: "
++            << (ns_per_op_random / ns_per_op_sequential) << "x faster"
++            << std::endl;
++
++  // Clean up
++  bt_clear(&random_tree, 0);
++  bt_clear(&sequential_tree, 0);
++
++  // Assert that sequential insertion is significantly faster than random
++  // insertion
++  REQUIRE(ns_per_op_sequential < ns_per_op_random / 5); // At least 5x faster
++}
+diff --git a/try_bgen/main.c b/try_bgen/main.c
+new file mode 100644
+index 0000000..ef7714d
+--- /dev/null
++++ b/try_bgen/main.c
+@@ -0,0 +1,31 @@
++#include <stdio.h>
++
++#define BGEN_NAME bt               // The namespace for the btree structure.
++#define BGEN_TYPE int              // The data type for all items in the btree.
++#define BGEN_LESS return a < b;    // Comparison code for sorting items.
++#include "bgen.h"                 // Include the bgen header.
++
++int main() {
++    struct bt *tree = 0;         // Create an empty btree instance.
++
++    // Insert some items into the btree
++    bt_insert(&tree, 3, 0, 0);
++    bt_insert(&tree, 8, 0, 0);
++    bt_insert(&tree, 2, 0, 0);
++    bt_insert(&tree, 5, 0, 0);
++
++    // Iterate and print items in the tree
++    struct bt_iter *iter;
++    bt_iter_init(&tree, &iter, 0);
++    for (bt_iter_scan(iter); bt_iter_valid(iter); bt_iter_next(iter)) {
++        int item;
++        bt_iter_item(iter, &item);
++        printf("%d ", item);
++    } 
++    printf("\n");
++
++    // Clean up and exit
++    bt_iter_release(iter);
++    bt_clear(&tree, 0);
++    return 0;
++}

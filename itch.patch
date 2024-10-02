@@ -1,0 +1,3667 @@
+diff --git a/itch-order-book/CMakeLists.txt b/itch-order-book/CMakeLists.txt
+new file mode 100644
+index 0000000..8199624
+--- /dev/null
++++ b/itch-order-book/CMakeLists.txt
+@@ -0,0 +1,98 @@
++cmake_minimum_required(VERSION 3.25)
++
++project(ItchOrderBook)
++
++set(CMAKE_CXX_STANDARD 20)
++set(CMAKE_CXX_STANDARD_REQUIRED True)
++
++list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
++
++include(FetchContent)
++
++# Add Abseil
++FetchContent_Declare(
++  abseil
++  GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
++  GIT_TAG        20240116.0
++)
++set(ABSL_PROPAGATE_CXX_STD ON)
++set(ABSL_ENABLE_INSTALL OFF)
++FetchContent_MakeAvailable(abseil)
++
++# Fetch the bgen library
++FetchContent_Declare(
++  bgen
++  GIT_REPOSITORY https://github.com/tidwall/bgen.git
++  GIT_TAG main
++)
++FetchContent_MakeAvailable(bgen)
++
++find_package(fmt REQUIRED)
++find_package(flatbuffers_interface REQUIRED)
++
++# Add external hash map libraries
++set(EXTERNAL_LIBRARIES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external)
++
++add_executable(itch_order_book
++    src/main.cpp
++    src/bufferedreader.cpp
++)
++
++# Link against the FlatBuffers interface library from fb_schema
++target_link_libraries(itch_order_book 
++    PRIVATE 
++        flatbuffers_interface
++        fmt::fmt
++        absl::flat_hash_map
++)
++
++# Include directories for all the hash map implementations
++target_include_directories(itch_order_book PRIVATE
++    ${EXTERNAL_LIBRARIES_DIR}/flat_hash_map
++    ${EXTERNAL_LIBRARIES_DIR}/parallel-hashmap
++    ${bgen_SOURCE_DIR}
++)
++
++# Add compiler flags from run.sh
++target_compile_options(itch_order_book PRIVATE
++    -g
++    -O3
++    -march=native
++    -Wall
++    -Wextra
++    -Wswitch-enum
++)
++
++# Optional: Improve error reporting consistency with run.sh
++if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
++    target_compile_options(itch_order_book PRIVATE -ferror-limit=2)
++endif() 
++
++# Add load_fbs executable
++add_executable(load_fbs
++    src/load_fbs.cpp
++)
++
++# Link against the same libraries as itch_order_book, plus unordered_dense
++target_link_libraries(load_fbs 
++    PRIVATE 
++        flatbuffers_interface
++        fmt::fmt
++        absl::flat_hash_map
++)
++
++# Include same libraries for load_fbs
++target_include_directories(load_fbs PRIVATE
++    ${EXTERNAL_LIBRARIES_DIR}/flat_hash_map
++    ${EXTERNAL_LIBRARIES_DIR}/parallel-hashmap
++)
++
++# Add the same compiler flags
++target_compile_options(load_fbs PRIVATE
++    -g
++    -O3
++    -march=native
++    -Wall
++    -Wextra
++    -Wswitch-enum
++)
+diff --git a/itch-order-book/README_L2_vs_L3.md b/itch-order-book/README_L2_vs_L3.md
+new file mode 100644
+index 0000000..c7c03ce
+--- /dev/null
++++ b/itch-order-book/README_L2_vs_L3.md
+@@ -0,0 +1,142 @@
++# L2 vs L3 Order Book Performance Comparison
++
++This document compares the performance difference between L2 (price level aggregated) and L3 (individual order tracking) order book implementations.
++
++## Implementation Details
++
++The order book implementation in `order_book.h` has been modified to support both L2 and L3 modes via compile-time configuration. This is controlled by the `kOrderBookConfig::TRACK_ORDERS_IN_LEVEL` setting:
++
++```cpp
++// In kOrderBookConfig struct
++static constexpr bool TRACK_ORDERS_IN_LEVEL = true;  // true for L3, false for L2
++```
++
++When `TRACK_ORDERS_IN_LEVEL` is set to `true`, the order book maintains a collection of individual orders at each price level, allowing for precise order-by-order tracking and time priority (FIFO) queue management. This is a full L3 order book.
++
++When set to `false`, the order book only tracks the aggregate quantity at each price level without maintaining individual order details. This is an L2 order book.
++
++Instead of using preprocessor macros, the implementation now uses C++17's `if constexpr` to conditionally compile only the code needed for each mode:
++
++```cpp
++void add_order(order_id_t oid, qty_t qty, timestamp_t timestamp = timestamp_t(0)) {
++  if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++    level_order_entry_t entry{qty, timestamp, oid, false};
++    m_orders.push_back(entry);
++  }
++}
++```
++
++This approach allows the compiler to eliminate the code paths that aren't needed based on the configuration setting, while keeping all the code in a more readable form.
++
++## Performance Improvements
++
++### Evolution of L3 Performance
++
++We've made several implementation changes to improve L3 performance:
++
++1. **Original (Map-based) Implementation**:
++   - Used `phmap::btree_map<order_id_t, level_order_entry_t>` to store orders at each price level
++   - Provided ordered iteration and O(log n) lookup
++   - Performance: 321.03 ns/packet
++
++2. **Vector-based Implementation**:
++   - Replaced map with `std::vector<level_order_entry_t>` to store orders
++   - Provides better cache locality, reduced memory allocation overhead
++   - Linear search for order lookups, but typically fast for small collections
++   - Performance: 297.79 ns/packet (7.2% improvement)
++
++3. **Lazy Deletion Implementation**:
++   - Added a `deleted` flag to `level_order_entry_t` instead of immediately removing entries
++   - Defers actual removal until a cleanup threshold is reached (25% deleted entries)
++   - Uses erase-remove idiom during cleanup to efficiently batch removals
++   - Reduces vector resizing and element shifting operations
++   - Performance: 305.25 ns/packet (slight regression from vector-only approach)
++
++4. **Vector Preallocation Implementation**:
++   - Maintains the vector and lazy deletion approach
++   - Preallocates vector capacity (reserves space for 8 orders initially)
++   - Reduces the number of reallocations and copies during order additions
++   - Performance: 286.71 ns/packet (10.7% improvement over the original implementation)
++
++### Current Performance Results
++
++The performance was tested with 50 million packets from NASDAQ ITCH feed data.
++
++| Mode | Implementation | Processing Time (ns) | Average Time per Packet (ns) | vs L2 |
++|------|---------------|----------------------|------------------------------|-------|
++| L2   | N/A           | 10,128,820,084      | 202.58                       | 0%    |
++| L3   | btree_map     | 16,051,680,422      | 321.03                       | +58%  |
++| L3   | vector        | 14,889,491,750      | 297.79                       | +47%  |
++| L3   | vector + lazy | 15,262,567,196      | 305.25                       | +51%  |
++| L3   | prealloc vector | 14,335,510,541    | 286.71                       | +41%  |
++
++**Performance Comparison**:
++- The L3 order book with preallocated vector storage is approximately **41% slower** than the L2 order book.
++- The best L3 implementation (preallocated vector) is **10.7% faster** than the original map-based L3 implementation.
++- Preallocation provides a **3.7% improvement** over the simple vector approach and **6.1% improvement** over lazy deletion.
++
++## Trade-offs
++
++### L3 Order Book (Full Order Tracking)
++- **Pros**:
++  - Maintains full order-by-order information
++  - Supports time priority (FIFO) queue management
++  - Can replay exact order execution sequence
++  - Essential for some trading strategies requiring precise queue position
++  
++- **Cons**:
++  - Higher memory usage
++  - Lower performance (41% slower than L2 in our best implementation)
++  - More complex implementation
++  - Linear search for order modifications and cancellations
++
++### L2 Order Book (Level Aggregation)
++- **Pros**:
++  - Faster processing (41% improvement over best L3 in our tests)
++  - Lower memory usage
++  - Simpler implementation
++  
++- **Cons**:
++  - No individual order tracking
++  - Cannot determine queue position or time priority
++  - Unsuitable for strategies requiring exact order sequence
++
++## Optimization Insights
++
++Our testing revealed several interesting performance characteristics:
++
++1. **Data Structure Selection**: The choice between tree-based maps and contiguous arrays (vectors) has a significant impact. For our workload, vectors provided better performance than btree maps despite theoretical O(n) vs O(log n) lookup complexity.
++
++2. **Lazy Deletion Trade-offs**: While lazy deletion theoretically reduces vector modifications, the additional overhead of checking the deletion flag and performing periodic cleanups outweighed the benefits in our specific workload. This demonstrates the importance of measuring actual performance rather than relying purely on algorithmic complexity analysis.
++
++3. **Memory Allocation Matters**: Preallocating vector capacity proved to be the most effective optimization, reducing the need for frequent reallocation during high-frequency order addition. This highlights how memory allocation overhead can be a significant factor in performance-critical applications.
++
++4. **Memory Access Patterns**: The vector-based approach likely benefits from better cache locality, as elements are stored contiguously in memory. This highlights how modern CPU architecture considerations can sometimes trump theoretical algorithm analysis.
++
++## Conclusion
++
++The choice between L2 and L3 depends on your specific requirements:
++
++- For high-frequency trading where microseconds matter and full order details aren't required, L2 provides significantly better performance.
++- For strategies requiring precise queue position or order sequence information, L3 is necessary despite the performance cost.
++
++Among the L3 implementations, the preallocated vector approach provided the best overall performance for our test dataset, improving the original map-based implementation by 10.7%.
++
++Our implementation allows switching between these modes at compile time, making it easy to benchmark and choose the appropriate mode for your specific needs.
++
++## Implementation Note
++
++The implementation uses a C++ configuration struct (`kOrderBookConfig`) with `constexpr` variables to control features like order tracking:
++
++```cpp
++// To switch to L2 mode:
++static constexpr bool TRACK_ORDERS_IN_LEVEL = false;
++
++// To switch to L3 mode:
++static constexpr bool TRACK_ORDERS_IN_LEVEL = true;
++
++// Vector preallocation size:
++static constexpr size_t LEVEL_ORDERS_INITIAL_CAPACITY = 8;
++```
++
++With C++17's `if constexpr`, the compiler can optimize out unused code at compile time, providing the performance benefits of preprocessing directives while maintaining cleaner, more maintainable code. 
+\ No newline at end of file
+diff --git a/itch-order-book/cmake/Findflatbuffers_interface.cmake b/itch-order-book/cmake/Findflatbuffers_interface.cmake
+new file mode 100644
+index 0000000..8fea163
+--- /dev/null
++++ b/itch-order-book/cmake/Findflatbuffers_interface.cmake
+@@ -0,0 +1,6 @@
++include(FetchContent)
++FetchContent_Declare(
++  flatbuffers_interface
++  SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../../fb_schema
++)
++FetchContent_MakeAvailable(flatbuffers_interface) 
+\ No newline at end of file
+diff --git a/itch-order-book/cmake/Findfmt.cmake b/itch-order-book/cmake/Findfmt.cmake
+new file mode 100644
+index 0000000..4018c85
+--- /dev/null
++++ b/itch-order-book/cmake/Findfmt.cmake
+@@ -0,0 +1,8 @@
++include(FetchContent)
++FetchContent_Declare(
++  fmt
++  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
++  GIT_TAG        10.2.1
++)
++FetchContent_MakeAvailable(fmt)
++
+diff --git a/itch-order-book/external/flat_hash_map b/itch-order-book/external/flat_hash_map
+new file mode 160000
+index 0000000..2c46874
+--- /dev/null
++++ b/itch-order-book/external/flat_hash_map
+@@ -0,0 +1 @@
++Subproject commit 2c4687431f978f02a3780e24b8b701d22aa32d9c
+diff --git a/itch-order-book/external/parallel-hashmap b/itch-order-book/external/parallel-hashmap
+new file mode 160000
+index 0000000..896f1a0
+--- /dev/null
++++ b/itch-order-book/external/parallel-hashmap
+@@ -0,0 +1 @@
++Subproject commit 896f1a03e429c45d9fe9638e892fc1da73befadd
+diff --git a/itch-order-book/implementation.md b/itch-order-book/implementation.md
+new file mode 100644
+index 0000000..c582b71
+--- /dev/null
++++ b/itch-order-book/implementation.md
+@@ -0,0 +1,67 @@
++Okay, here's a summary of how `itch-order-book/src/order_book.h` handles order book updates, broken down into the two requested parts:
++
++**1. `oid_map` (Order Store: `order_id_t` -> `order_t`)**
++
++*   **Purpose:** Acts as the primary store for individual order metadata. It maps a unique `order_id_t` to its corresponding `order_t` struct.
++*   **`order_t` Contents:** Each `order_t` struct holds:
++    *   `m_qty`: The current remaining quantity of the order.
++    *   `level_idx`: A `level_id_t` which acts as a pointer/identifier to the aggregated price `level` object this order contributes to within the `s_levels` pool.
++    *   `book_idx`: A `book_id_t` identifying which specific `order_book` instance (instrument) this order belongs to within the `s_books` array.
++*   **Implementation:**
++    *   Uses a compile-time selectable map implementation via CRTP (`oidmap_base`, `oidmap_vector_impl`, `oidmap_ankerl_impl`, etc.) chosen by the `kOrderBookConfig::oidMapImpl` `constexpr` value.
++    *   The actual map (`m_data`) resides within the specific implementation class chosen by the `oidmap<T>` type alias.
++    *   The global instance `order_book::oid_map` is declared using this `oidmap<order_t>` alias.
++*   **Update Logic:**
++    *   **`add_order`:** Retrieves the `order_t` entry for the new `oid` (reserving/resizing if using the vector implementation). Sets the `m_qty` and `book_idx`. Critically, it then calls the specific `order_book` instance's `ADD_ORDER` method, which calculates and returns the `level_idx`, which is then stored back into this `order_t` entry in `oid_map`.
++    *   **`cancel_order` (Reduce):** Retrieves the `order_t` entry. Calls the specific `order_book` instance's `REDUCE_ORDER` method, which directly modifies the `m_qty` within *this* `order_t` entry, besides updating the aggregated level quantity.
++    *   **`delete_order`:** Retrieves the `order_t` entry primarily to get the `book_idx` and `level_idx` needed to update the aggregated levels. The `order_t` entry itself isn't explicitly removed or marked invalid within `oid_map` by this function (though its underlying memory might be reused later by the map implementation). The order's quantity is used by the book's `DELETE_ORDER` method to decrement the level.
++    *   **`execute_order`:** Retrieves the `order_t`. Based on full or partial execution, it calls either the book's `DELETE_ORDER` or `REDUCE_ORDER` method. If it's a partial execution (`REDUCE_ORDER`), the `order_t->m_qty` in `oid_map` is updated.
++    *   **`replace_order`:** Retrieves the old `order_t`. Calls the book's `DELETE_ORDER` for the old order. Then, it calls the static `add_order` for the *new* `oid`, effectively creating/updating a new `order_t` entry in `oid_map` and linking it to the appropriate (potentially new) price level via the book's `ADD_ORDER`.
++
++**2. Order Book Levels (Price Level Aggregation)**
++
++*   **Purpose:** Maintains the aggregated view of the order book for each instrument, showing total quantity available at each price point for bids and offers. When operating in L3 mode, it also tracks individual orders within these levels.
++*   **Implementation:**
++    *   `order_book::s_books`: A static array (`new order_book[MAX_BOOKS]`) storing individual `order_book` objects, one per instrument, indexed by `book_id_t`.
++    *   `order_book` Class Members: Each instance contains:
++        *   `m_bids`: A `phmap::btree_map<sprice_t, level_id_t>` storing bid levels, kept sorted by price.
++        *   `m_offers`: A `phmap::btree_map<sprice_t, level_id_t>` storing offer levels, kept sorted by price.
++    *   `order_book::s_levels`: A static, global `pool` managing memory for all `level` objects across *all* books. Indexed by `level_id_t`.
++    *   `level` Struct: Contains:
++        *   `m_price` (`sprice_t`): The price of this level
++        *   `m_qty` (`qty_t`): Total aggregated quantity at this price level
++        *   `m_orders` (`std::vector<level_order_entry_t>`): Vector of orders at this level (when `TRACK_ORDERS_IN_LEVEL` is true)
++        *   `m_deleted_count`: Count of logically deleted entries in the vector
++    *   `level_order_entry_t` Struct: Represents a single order within a level, containing:
++        *   `qty` (`qty_t`): The quantity of this order
++        *   `timestamp` (`timestamp_t`): The order timestamp
++        *   `oid` (`order_id_t`): The order ID (key)
++        *   `deleted` (`bool`): Flag indicating if this order has been logically deleted
++*   **Update Logic (Instance Methods of `order_book`):**
++    *   **`ADD_ORDER`:**
++        *   Selects `m_bids` or `m_offers` based on price sign.
++        *   Uses `.find()` on the selected `phmap::btree_map` to check if the price exists.
++        *   **If price exists:** Gets the `level_id_t` from the found entry, uses it to access the `level` object in `s_levels`, and increments `level->m_qty`. Returns this `level_id_t` to the caller (`add_order`) to be stored in the `oid_map`.
++        *   **If price doesn't exist:** Allocates a new `level` from `s_levels`, initializes its price and quantity (initially 0). Inserts new entry into `m_bids`/`m_offers` mapping price to the new `level_id_t`. Increments the new `level->m_qty`. Returns the new `level_id_t` to the caller.
++        *   **When in L3 mode:** May trigger cleanup of deleted orders, then creates a `level_order_entry_t` with the order's quantity, timestamp, ID, and deleted=false flag, and adds it to the `level->m_orders` vector.
++    *   **`REDUCE_ORDER`:**
++        *   Uses the `order->level_idx` (passed in, originally from `oid_map`) to directly access the `level` object in `s_levels`.
++        *   Decrements `level->m_qty` by the reduced quantity.
++        *   (Also updates the `order->m_qty` in `oid_map` as noted before).
++        *   **When in L3 mode:** Searches through the `level->m_orders` vector for the matching non-deleted `oid`. If found, decrements its quantity, and if quantity becomes zero, marks the entry as deleted and increments the deleted count. May trigger cleanup if deletion threshold is reached.
++    *   **`DELETE_ORDER`:**
++        *   Uses `order->level_idx` to directly access the `level` object in `s_levels`.
++        *   Decrements `level->m_qty` by the `order->m_qty`.
++        *   **When in L3 mode:** Searches through the `level->m_orders` vector for the matching non-deleted `oid` and marks it as deleted if found, incrementing the deleted count. May trigger cleanup if deletion threshold is reached.
++        *   **If `level->m_qty` becomes 0:** Gets the price from the level. Uses the price to find and remove the entry from `m_bids`/`m_offers`. Frees the `level` object back to the `s_levels` pool using its `level_id_t`.
++    *   **Lazy Deletion Mechanics:**
++        *   `level::maybe_cleanup()`: Checks if the ratio of deleted entries to total entries exceeds the threshold (25%). If so, calls `cleanup()`.
++        *   `level::cleanup()`: Uses the erase-remove idiom to efficiently remove all deleted entries from the vector in a single operation. Resets the deleted count to zero.
++        *   The lazy deletion approach trades off memory usage (temporarily keeping deleted entries) for reduced vector modifications, which can be expensive due to element shifting.
++    *   **Vector Preallocation:**
++        *   In the `level` constructor, the `m_orders` vector is pre-allocated with `reserve(LEVEL_ORDERS_INITIAL_CAPACITY)` to avoid frequent reallocations
++        *   `kOrderBookConfig::LEVEL_ORDERS_INITIAL_CAPACITY` is set to 8, providing a good balance between memory usage and reduced allocation overhead
++        *   Reduces vector growth/copy operations during periods of high order activity
++        *   Significantly improves performance by reducing memory allocation overhead
++
++This implementation provides a hybrid of L2 and L3 functionality, choosing between them via compile-time configuration. The vector-based approach with preallocation and lazy deletion maintains all the L3 capabilities such as order tracking and FIFO queue management, while optimizing performance through strategic memory allocation and cache-friendly data structures. The preallocation optimization provides the best performance among our L3 implementations, improving the original map-based approach by 10.7%.
+diff --git a/itch-order-book/run.sh b/itch-order-book/run.sh
+new file mode 100644
+index 0000000..f25f60b
+--- /dev/null
++++ b/itch-order-book/run.sh
+@@ -0,0 +1,40 @@
++#!/bin/bash
++set -uexo pipefail
++
++# --- Configuration ---
++SCRIPT_DIR=`dirname $0`
++BUILD_DIR="$SCRIPT_DIR/build"
++DATA_FILE="../../local_data/01302020.NASDAQ_ITCH50" # Adjust if necessary
++MAX_PACKETS=50000000
++
++# Set to true to enable FlatBuffers hex dump mode
++# DUMP_MODE=true 
++DUMP_MODE=false 
++OUTPUT_FILE="output_flatbuffers.hex"
++# --- End Configuration ---
++
++# Configure
++mkdir -p "$BUILD_DIR"
++cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
++
++# Build
++cmake --build "$BUILD_DIR" --target itch_order_book --config Release
++
++# Run
++echo "Running..."
++cd "$BUILD_DIR" # Run from build directory
++
++# Prepare arguments
++ARGS=("-i" "$DATA_FILE" "-n" "$MAX_PACKETS")
++
++if [ "$DUMP_MODE" = true ]; then
++  echo "Dump mode enabled. Outputting FlatBuffers hex to $OUTPUT_FILE"
++  # Add dump mode flag and output file argument
++  ARGS+=("-d" "-o" "$OUTPUT_FILE")
++  time ./itch_order_book "${ARGS[@]}" 
++  echo "Hex output saved to $PWD/$OUTPUT_FILE"
++else
++  echo "Order book build mode enabled."
++  # Run normally (building order book) - only needs input and max packets
++  time ./itch_order_book "${ARGS[@]}" 
++fi
+\ No newline at end of file
+diff --git a/itch-order-book/run_load.sh b/itch-order-book/run_load.sh
+new file mode 100755
+index 0000000..d3d85c2
+--- /dev/null
++++ b/itch-order-book/run_load.sh
+@@ -0,0 +1,30 @@
++#!/bin/bash
++set -uexo pipefail
++
++# --- Configuration ---
++SCRIPT_DIR=`dirname $0`
++BUILD_DIR="$SCRIPT_DIR/build"
++OUTPUT_FILE="output_flatbuffers.hex"  # This should match output file in run.sh
++# --- End Configuration ---
++
++# Configure
++mkdir -p "$BUILD_DIR"
++cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -G Ninja -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
++
++
++# Build
++cmake --build "$BUILD_DIR" --target load_fbs --config Release
++
++# Check if output file exists
++if [ ! -f "$BUILD_DIR/$OUTPUT_FILE" ]; then
++  echo "Error: FlatBuffers output file not found: $BUILD_DIR/$OUTPUT_FILE"
++  echo "Please run './run.sh' with DUMP_MODE=true first to generate the file."
++  exit 1
++fi
++
++# Run
++echo "Running load_fbs..."
++cd "$BUILD_DIR" # Run from build directory
++time ./load_fbs -i "$OUTPUT_FILE"
++
++echo "Finished processing FlatBuffers file." 
+\ No newline at end of file
+diff --git a/itch-order-book/src/CONTRIB.md b/itch-order-book/src/CONTRIB.md
+new file mode 100644
+index 0000000..63759ca
+--- /dev/null
++++ b/itch-order-book/src/CONTRIB.md
+@@ -0,0 +1,3 @@
++Please try to follow https://chris.beams.io/posts/git-commit/
++
++If you create an issue or a PR and I don't reply, I am probably **not** ignoring you! I almost certainly just didn't get an email notification. If you would like to hear back from me quickly, simply shoot me an email and I will get back to you quickly.
+diff --git a/itch-order-book/src/README.md b/itch-order-book/src/README.md
+new file mode 100644
+index 0000000..1563bd0
+--- /dev/null
++++ b/itch-order-book/src/README.md
+@@ -0,0 +1,7 @@
++This is a very fast implementation of the ITCH order book, clocking in at around 61ns / tick (or 16 million messages / second, tested on a 2012 i7-3820), offering fast updates and O(1) access to any price level (to get the price is a single dereference, the aggregate quantity is another dereference). It only calculates the aggregate quantities at each price and does not track the queue depth for each order.
++
++Among other things, there is no hashtable or trees used, only `<vector>`s and C arrays, and no allocation beyond what `<vector>` does. For description and implementation see [order_book.h](order_book.h).
++
++Protocol specification: http://www.nasdaqtrader.com/content/technicalsupport/specifications/dataproducts/NQTVITCHSpecification.pdf (ITCH 5.0). Binary file spec: http://www.nasdaqtrader.com/content/technicalSupport/specifications/dataproducts/binaryfile.pdf.
++
++In order to run it, `./build.sh && ./a.out < [file]`. Note that the implementation is fast enough that you will likely to be I/O bound - in order to find out how fast it really is you should 'warm-up' by loading the file into the buffer cache using `cat [file] > /dev/null`. Sample files available at `ftp://emi.nasdaq.com/ITCH/` (the file name has the format `MMDDYYYY.NASDAQ_ITCH50.gz`).
+diff --git a/itch-order-book/src/bufferedreader.cpp b/itch-order-book/src/bufferedreader.cpp
+new file mode 100644
+index 0000000..7fc8551
+--- /dev/null
++++ b/itch-order-book/src/bufferedreader.cpp
+@@ -0,0 +1,90 @@
++#include <errno.h>
++#include <netdb.h>
++#include <netinet/tcp.h>
++#include <stdio.h>
++#include <sys/socket.h>
++#include "bufferedreader.h"
++
++/** Blocking call. Ensures that n bytes are available to consume.
++ * If they are there already it will return immediately. Else
++ * it will attempt to read. If it is able to read enough bytes
++ * then it returns true. On read error it will return false.
++ */
++read_t buf_t::ensure(unsigned const n)
++{
++  if (this->available(n))
++    return read_t::OK;  // fast path. call before read for performance
++
++  ssize_t bytes = this->read(n);
++  if (bytes == 0)
++    return read_t::ERR;  // EOF
++  else if (bytes < 0)
++    return read_t::ERR;  // read error
++  else
++    return read_t::OK;
++}
++
++/** Blocking read.
++ * If n > read_max_bufpos - read_bufpos, it will read into the buffer.
++ * If n > buflen - read_bufpos it will also
++ * If n > buflen and not compiled with -DNDEBUG it will assert false.
++ * If n > buflen and compiled with -DNDEBUG the behavior is undefined.
++ * This will not advance pos but may advance limit
++ * Returns 0 on EOF and a negative number on read error
++ */
++ssize_t buf_t::read(unsigned const n)
++{
++  assert(n <= len);
++  assert(pos <= limit);
++  assert(limit <= len);
++  if (pos + n > len) discard_to_pos();
++
++  ssize_t bytes_read = 0;
++  while (this->available() < n) {
++    ssize_t bytes = this->read();
++    if (bytes < 0) {
++      perror("Read error:");
++      return bytes;
++    }
++    if (0 == bytes) return 0;  // EOF and this must be handled.
++    bytes_read += bytes;
++  }
++  return bytes_read;
++}
++
++// reads as many bytes as possible into buf and returns num bytes
++// advances read_max_bufpos and read_bufpos
++ssize_t buf_t::read()
++{
++  // read into offset however many free bytes left in buffer
++  ssize_t bytes = ::read(this->fd, (void*)(ptr + limit), len - limit);
++  if (-1 == bytes) {
++    perror("blocking read into buf!");
++    return -1;
++  }
++  assert(0 <= bytes);
++  assert(bytes <= len);
++  limit += (unsigned)bytes;
++  bytesread += (size_t)bytes;
++  assert(pos <= limit);
++  assert(limit <= len);
++  return bytes;
++}
++
++/* behavior is almost identical to nb_read_into_buf but it returns -1 on any
++ * error
++ * and only returns zero in the same circumstances that recv or read would (i.e.
++ * EOF)*/
++ssize_t buf_t::nb_read()
++{
++  ssize_t bytes =
++      recv(this->fd, (void*)(ptr + limit), len - limit, MSG_DONTWAIT);
++  if (-1 == bytes) return -1;
++  assert(bytes <= len);
++  assert(bytes >= 0);
++  limit += (unsigned)bytes;
++  bytesread += (size_t)bytes;
++  assert(pos <= limit);
++  assert(limit <= len);
++  return bytes;
++}
+diff --git a/itch-order-book/src/bufferedreader.h b/itch-order-book/src/bufferedreader.h
+new file mode 100644
+index 0000000..4e88559
+--- /dev/null
++++ b/itch-order-book/src/bufferedreader.h
+@@ -0,0 +1,83 @@
++#pragma once
++#include <assert.h>
++#include <string.h>
++#include <unistd.h>
++#include "types.h"
++
++// need this typing because cpp mindlessly promotes
++// bool to int. so it thinks statements like
++// { (bool)foo < 0 } are sensical even though it will never happen
++enum class read_t { OK, ERR };
++inline bool is_ok(read_t const retcode) { return read_t::OK == retcode; }
++inline read_t operator!(read_t const code)
++{
++  return code;  // will throw compiler error if you try to use it like boolean!
++}
++
++/** Struct for buffered reading. Everything is public to give low level access
++ * if needed */
++typedef struct buf {
++  buf(unsigned int len) : ptr(new char[len]), len(len), limit(0), pos(0) {}
++  ~buf() { delete[] ptr; }
++  char *const ptr;
++  /** Length of buf */
++  unsigned int const len;  // could be private
++  /** Position of last byte read into buf */
++  unsigned int limit;  // could be private
++  unsigned int pos;
++  size_t bytesread;
++  fd_t fd = -1;
++  /** Returns a pointer to ptr + pos + idx */
++  char const *get(unsigned int idx) const
++  {
++#if 0  // optimization
++		assert (pos + idx <= limit);
++#endif
++    return ptr + pos + idx;
++  }
++  // maybe this could be useful ?
++  // char head(void) const { return *(ptr + pos); }
++
++  /** Returns available bytes in buf */
++  unsigned available(void) const { return limit - pos; }
++  bool available(unsigned n) const
++  {
++    return pos + n <= limit;  // faster than available() >= n;
++  }
++  /** Returns available space to read bytes into */
++  unsigned free_space(void) const { return len - limit; }
++  void advance(unsigned bytes)
++  {
++    pos += bytes;
++    assert(pos <= limit);
++  }
++  void discard_to_pos(void)
++  {
++    if (pos && pos < limit)
++      memmove((void *)ptr, ptr + pos,
++              limit - pos);  // shift to beginning of buf
++    limit -= pos;
++    pos = 0;
++  }
++  void cleanup(void)
++  {
++    limit = pos = 0;
++    fd = -1;
++  }
++  /* blocking read. blocks until 1 or more (until available()) bytes are
++   * available.
++   */
++  ssize_t read(void);
++  /* blocking read. blocks until at least n bytes are available
++   * returns number of bytes read. 0 in case of EOF and -1 for other read error.
++   */
++  ssize_t read(unsigned n);
++  /* Essentially a wrapper around read(n). If at least n bytes are
++   * available in the buffer returns true immediately. Otherwise
++   * it tries to read as many bytes as necessary to get n bytes
++   * in the buffer. Returns false if read(n) returns <= 0.
++   */
++  read_t ensure(unsigned n);
++  /* non blocking read for use in a select / multiplexing event loop */
++  ssize_t nb_read(void);
++} buf_t;
+diff --git a/itch-order-book/src/build.sh b/itch-order-book/src/build.sh
+new file mode 100755
+index 0000000..d3ba44a
+--- /dev/null
++++ b/itch-order-book/src/build.sh
+@@ -0,0 +1,5 @@
++clang++ -ferror-limit=2 \
++	-g -O3 -march=native -Wall -Wextra -Wswitch-enum -std=c++1y \
++	main.cpp bufferedreader.cpp
++#g++ -g -Og -march=native -std=c++1y main.cpp bufferedreader.cpp
++g++ -O3 -march=native -std=c++1y main.cpp bufferedreader.cpp
+diff --git a/itch-order-book/src/format_code.sh b/itch-order-book/src/format_code.sh
+new file mode 100755
+index 0000000..a0cbd9c
+--- /dev/null
++++ b/itch-order-book/src/format_code.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++for file in $(find . | grep -P "\.(cpp|h)$")
++do
++  echo $file
++  clang-format -style="{ BasedOnStyle: Google , BreakBeforeBraces: Linux , NamespaceIndentation: All } " < $file > tmp
++  mv tmp $file
++done
+diff --git a/itch-order-book/src/itch.h b/itch-order-book/src/itch.h
+new file mode 100644
+index 0000000..220fe6c
+--- /dev/null
++++ b/itch-order-book/src/itch.h
+@@ -0,0 +1,224 @@
++#pragma once
++#include <sys/types.h>
++
++enum class itch_t {
++  SYSEVENT = 'S',
++  STOCK_DIRECTORY = 'R',
++  TRADING_ACTION = 'H',
++  REG_SHO_RESTRICT = 'Y',  // 20
++  MPID_POSITION = 'L',     // 26
++  MWCB_DECLINE = 'V',      // market wide circuit breaker // 35
++  MWCB_STATUS = 'W',
++  IPO_QUOTE_UPDATE = 'K',  // 28
++  ADD_ORDER = 'A',         // 36
++  ADD_ORDER_MPID = 'F',
++  EXECUTE_ORDER = 'E',
++  EXECUTE_ORDER_WITH_PRICE = 'C',
++  REDUCE_ORDER = 'X',
++  DELETE_ORDER = 'D',
++  REPLACE_ORDER = 'U',
++  TRADE = 'P',
++  CROSS_TRADE = 'Q',
++  BROKEN_TRADE = 'B',
++  NET_ORDER_IMBALANCE = 'I',
++  RETAIL_PRICE_IMPROVEMENT = 'N',
++  PROCESS_LULD_AUCTION_COLLAR_MESSAGE = 'J'
++};
++using MSG = itch_t;
++template <MSG __type>
++unsigned char constexpr netlen = -1;
++template <>
++constexpr unsigned char netlen<MSG::SYSEVENT> = 12;
++template <>
++constexpr unsigned char netlen<MSG::STOCK_DIRECTORY> = 39;
++template <>
++constexpr unsigned char netlen<MSG::TRADING_ACTION> = 25;
++template <>
++constexpr unsigned char netlen<MSG::REG_SHO_RESTRICT> = 20;
++template <>
++constexpr unsigned char netlen<MSG::MPID_POSITION> = 26;
++template <>
++constexpr unsigned char netlen<MSG::MWCB_DECLINE> = 35;
++template <>
++constexpr unsigned char netlen<MSG::MWCB_STATUS> = 12;
++template <>
++constexpr unsigned char netlen<MSG::IPO_QUOTE_UPDATE> = 28;
++template <>
++constexpr unsigned char netlen<MSG::ADD_ORDER> = 36;
++template <>
++constexpr unsigned char netlen<MSG::ADD_ORDER_MPID> = 40;
++template <>
++constexpr unsigned char netlen<MSG::EXECUTE_ORDER> = 31;
++template <>
++constexpr unsigned char netlen<MSG::EXECUTE_ORDER_WITH_PRICE> = 36;
++template <>
++constexpr unsigned char netlen<MSG::REDUCE_ORDER> = 23;
++template <>
++constexpr unsigned char netlen<MSG::DELETE_ORDER> = 19;
++template <>
++constexpr unsigned char netlen<MSG::REPLACE_ORDER> = 35;
++template <>
++constexpr unsigned char netlen<MSG::TRADE> = 44;
++template <>
++constexpr unsigned char netlen<MSG::CROSS_TRADE> = 40;
++template <>
++constexpr unsigned char netlen<MSG::BROKEN_TRADE> = 19;
++template <>
++constexpr unsigned char netlen<MSG::NET_ORDER_IMBALANCE> = 50;
++template <>
++constexpr unsigned char netlen<MSG::RETAIL_PRICE_IMPROVEMENT> = 20;
++template <>
++constexpr unsigned char netlen<MSG::PROCESS_LULD_AUCTION_COLLAR_MESSAGE> = 35;
++
++template <itch_t __code>
++struct itch_message {
++  static constexpr itch_t code = __code;
++  static constexpr unsigned char network_len = netlen<__code>;
++  static itch_message parse(char const *ptr)
++  {
++    static_cast<void>(ptr);
++    return itch_message();
++  }
++};
++
++enum class BUY_SELL : char { BUY = 'B', SELL = 'S' };
++enum class timestamp_t : uint64_t {};
++enum class oid_t : uint64_t {};
++enum class price_t : uint32_t {};
++enum class qty_t : uint32_t {};
++static uint64_t read_eight(char const *src)
++{
++  return be64toh(*(uint64_t const *)src);
++}
++static uint64_t read_six(char const *src)
++{
++  uint64_t ret;
++  char *pun = (char *)&ret;
++  // it's not clear whether this is faster than six separate char assignments
++  memcpy(pun, src, 6);
++  return (be64toh(ret) >> 16);
++}
++static uint32_t read_four(char const *src)
++{
++  return be32toh(*(uint32_t const *)src);
++}
++static uint16_t read_two(char const *src)
++{
++  return be16toh(*(uint16_t const *)src);
++}
++
++static timestamp_t read_timestamp(char const *src)
++{
++  return timestamp_t(read_six(src));
++}
++static oid_t read_oid(char const *src) { return oid_t(read_eight(src)); }
++static price_t read_price(char const *src) { return price_t(read_four(src)); }
++static qty_t read_qty(char const *src) { return qty_t(read_four(src)); }
++static uint16_t read_locate(char const *src) { return read_two(src); }
++using add_order_t = itch_message<MSG::ADD_ORDER>;
++template <>
++struct itch_message<MSG::ADD_ORDER> {
++  itch_message(timestamp_t __timestamp, oid_t __oid, price_t __price,
++               qty_t __qty, uint16_t __stock_locate, BUY_SELL __buy)
++      : timestamp(__timestamp),
++        oid(__oid),
++        price(__price),
++        qty(__qty),
++        stock_locate(__stock_locate),
++        buy(__buy)
++  {
++  }
++  timestamp_t const timestamp;
++  oid_t const oid;
++  price_t const price;
++  qty_t const qty;
++  uint16_t const stock_locate;
++  BUY_SELL const buy;
++  static itch_message parse(char const *ptr)
++  {
++    return add_order_t(read_timestamp(ptr + 5), read_oid(ptr + 11),
++                       read_price(ptr + 32), read_qty(ptr + 20),
++                       read_locate(ptr + 1), BUY_SELL(*(ptr + 19)));
++  }
++};
++using add_order_mpid_t = itch_message<MSG::ADD_ORDER_MPID>;
++template <>
++struct itch_message<MSG::ADD_ORDER_MPID> {
++  itch_message(add_order_t const __base) : add_msg(__base) {}
++  add_order_t const add_msg;
++  static itch_message parse(char const *ptr)
++  {
++    return itch_message(add_order_t::parse(ptr));
++  }
++};
++using execute_order_t = itch_message<MSG::EXECUTE_ORDER>;
++template <>
++struct itch_message<MSG::EXECUTE_ORDER> {
++  itch_message(oid_t __oid, timestamp_t __t, qty_t __q, uint16_t __s)
++      : oid(__oid), timestamp(__t), qty(__q), stock_locate(__s)
++  {
++  }
++  oid_t const oid;
++  timestamp_t const timestamp;
++  qty_t const qty;
++  uint16_t const stock_locate;
++  static itch_message parse(char const *ptr)
++  {
++    return itch_message(read_oid(ptr + 11), read_timestamp(ptr + 5),
++                        read_qty(ptr + 19), read_locate(ptr + 1));
++  }
++};
++using execute_with_price_t = itch_message<MSG::EXECUTE_ORDER_WITH_PRICE>;
++template <>
++struct itch_message<MSG::EXECUTE_ORDER_WITH_PRICE> {
++  itch_message(execute_order_t const __base) : exec(__base) {}
++  execute_order_t const exec;
++  static itch_message parse(char const *ptr)
++  {
++    return itch_message(execute_order_t::parse(ptr));
++  }
++};
++using order_reduce_t = itch_message<MSG::REDUCE_ORDER>;
++template <>
++struct itch_message<MSG::REDUCE_ORDER> {
++  itch_message(oid_t __o, timestamp_t __t, qty_t __q)
++      : oid(__o), timestamp(__t), qty(__q)
++  {
++  }
++  oid_t const oid;
++  timestamp_t const timestamp;
++  qty_t const qty;
++  static itch_message parse(char const *ptr)
++  {
++    return itch_message(read_oid(ptr + 11), read_timestamp(ptr + 5),
++                        read_qty(ptr + 19));
++  }
++};
++using order_delete_t = itch_message<MSG::DELETE_ORDER>;
++template <>
++struct itch_message<MSG::DELETE_ORDER> {
++  itch_message(oid_t __o, timestamp_t __t) : oid(__o), timestamp(__t) {}
++  oid_t const oid;
++  timestamp_t const timestamp;
++  static itch_message parse(char const *ptr)
++  {
++    return itch_message(read_oid(ptr + 11), read_timestamp(ptr + 5));
++  }
++};
++using order_replace_t = itch_message<MSG::REPLACE_ORDER>;
++template <>
++struct itch_message<MSG::REPLACE_ORDER> {
++  itch_message(oid_t __old_oid, oid_t __new_oid, qty_t __q, price_t __p)
++      : oid(__old_oid), new_order_id(__new_oid), new_qty(__q), new_price(__p)
++  {
++  }
++  oid_t const oid;
++  oid_t const new_order_id;
++  qty_t const new_qty;
++  price_t const new_price;
++  static itch_message parse(char const *ptr)
++  {
++    return itch_message(read_oid(ptr + 11), read_oid(ptr + 19),
++                        read_qty(ptr + 27), read_price(ptr + 31));
++  }
++};
+diff --git a/itch-order-book/src/load_fbs.cpp b/itch-order-book/src/load_fbs.cpp
+new file mode 100644
+index 0000000..9869f52
+--- /dev/null
++++ b/itch-order-book/src/load_fbs.cpp
+@@ -0,0 +1,1254 @@
++// load_fbs.cpp
++
++#include <fb_schema/schema_itch_generated.h> // FlatBuffers generated code
++#include <flatbuffers/flatbuffers.h>         // FlatBuffers runtime
++
++#include <parallel_hashmap/phmap.h> // For phmap::flat_hash_map
++#include <chrono>                   // For timing
++#include <fmt/core.h>
++#include <fstream>   // For std::ifstream
++#include <getopt.h>  // For command line parsing
++#include <iomanip>   // For std::setw
++#include <iostream>  // For std::cerr, std::cout
++#include <optional>  // For std::optional in vector-based store
++#include <stdexcept> // For std::runtime_error
++#include <string>
++#include <unordered_map> // For message type stats and order store
++#include <variant>       // For std::monostate
++#include <vector>
++
++namespace itch_parser {
++
++// Define Order struct to store order information
++struct Order {
++  uint64_t order_id;
++  uint32_t price_value; // Raw price value
++  uint32_t quantity;
++  Itch::BuySell side;
++  std::string symbol;
++};
++
++// Define OrderStore type for tracking orders
++using OrderStore = std::unordered_map<uint64_t, Order>;
++// Define OrderStoreDense type using phmap::flat_hash_map
++using OrderStoreDense = phmap::flat_hash_map<uint64_t, Order>;
++// Define OrderStoreVector type using std::vector<std::optional<Order>>
++using OrderStoreVector = std::vector<std::optional<Order>>;
++
++// Helper function to convert a hex character to its integer value
++inline uint8_t hex_char_to_byte(char c) {
++  if (c >= '0' && c <= '9')
++    return c - '0';
++  if (c >= 'a' && c <= 'f')
++    return c - 'a' + 10;
++  if (c >= 'A' && c <= 'F')
++    return c - 'A' + 10;
++  throw std::runtime_error(fmt::format("Invalid hex character: {}", c));
++}
++
++// Helper function to convert a hex string to a byte vector
++std::vector<uint8_t> hex_string_to_bytes(const std::string &hex_str) {
++  if (hex_str.length() % 2 != 0) {
++    throw std::runtime_error(
++        "Hex string must have an even number of characters.");
++  }
++  std::vector<uint8_t> bytes;
++  bytes.reserve(hex_str.length() / 2);
++  for (size_t i = 0; i < hex_str.length(); i += 2) {
++    bytes.push_back((hex_char_to_byte(hex_str[i]) << 4) |
++                    hex_char_to_byte(hex_str[i + 1]));
++  }
++  return bytes;
++}
++
++// Global counter to limit printing to first 2 messages
++static size_t processed_msg_count = 0;
++static const size_t max_messages_to_print = 2;
++
++// Struct to hold timing statistics for each message type
++struct MessageStats {
++  std::string name;
++  size_t count = 0;
++  uint64_t total_ns = 0;
++
++  double avg_ns() const {
++    return count > 0 ? static_cast<double>(total_ns) / count : 0.0;
++  }
++};
++
++// Map to store stats for each message type
++static std::unordered_map<Itch::ItchMessage, MessageStats> message_stats;
++
++// Helper to get message type name
++std::string get_message_type_name(Itch::ItchMessage msg_type) {
++  return Itch::EnumNameItchMessage(msg_type);
++}
++
++// --- Printing Helper Functions for FlatBuffer Structs ---
++
++void print_timestamp(const Itch::Timestamp *ts) {
++  if (ts) {
++    fmt::print("  Timestamp (ns): {}\n", ts->nanoseconds());
++  }
++}
++
++void print_oid(const Itch::Oid *oid) {
++  if (oid) {
++    fmt::print("  OID: {}\n", oid->id());
++  }
++}
++
++void print_price(const Itch::Price *price) {
++  if (price) {
++    // Assuming price needs scaling (e.g., by 10000 for ITCH)
++    fmt::print("  Price: {} (raw: {})\n",
++               static_cast<double>(price->value()) / 10000.0, price->value());
++  }
++}
++
++void print_qty(const Itch::Qty *qty) {
++  if (qty) {
++    fmt::print("  Quantity: {}\n", qty->shares());
++  }
++}
++
++void print_add_order(const Itch::AddOrder *msg) {
++  fmt::print("--- Add Order ---\n");
++  fmt::print("  Stock Locate: {}\n", msg->stock_locate());
++  print_timestamp(msg->timestamp());
++  print_oid(msg->oid());
++  fmt::print("  Buy/Sell: {}\n", Itch::EnumNameBuySell(msg->buy_sell()));
++  print_qty(msg->qty());
++  fmt::print("  Stock Symbol: {}\n",
++             msg->stock_symbol() ? msg->stock_symbol()->str() : "N/A");
++  print_price(msg->price());
++}
++
++void print_add_order_mpid(const Itch::AddOrderMpid *msg) {
++  fmt::print("--- Add Order MPID ---\n");
++  if (msg->add_order()) {
++    print_add_order(msg->add_order()); // Reuse AddOrder printing
++  }
++  fmt::print("  MPID: {}\n", msg->mpid() ? msg->mpid()->str() : "N/A");
++}
++
++void print_execute_order(const Itch::ExecuteOrder *msg) {
++  fmt::print("--- Execute Order ---\n");
++  fmt::print("  Stock Locate: {}\n", msg->stock_locate());
++  print_timestamp(msg->timestamp());
++  print_oid(msg->oid());
++  print_qty(msg->qty());
++  fmt::print("  Match Number: {}\n", msg->match_number());
++}
++
++void print_execute_order_with_price(const Itch::ExecuteOrderWithPrice *msg) {
++  fmt::print("--- Execute Order With Price ---\n");
++  if (msg->execute_order()) {
++    print_execute_order(msg->execute_order()); // Reuse ExecuteOrder printing
++  }
++  fmt::print("  Printable: {}\n", msg->printable());
++  print_price(msg->price());
++  fmt::print("  Match Number: {}\n",
++             msg->match_number()); // Often redundant, but in schema
++}
++
++void print_reduce_order(const Itch::ReduceOrder *msg) {
++  fmt::print("--- Reduce Order (Cancel) ---\n");
++  fmt::print("  Stock Locate: {}\n", msg->stock_locate());
++  print_timestamp(msg->timestamp());
++  print_oid(msg->oid());
++  fmt::print("  New Quantity: {}\n", msg->qty() ? msg->qty()->shares() : 0);
++}
++
++void print_delete_order(const Itch::DeleteOrder *msg) {
++  fmt::print("--- Delete Order ---\n");
++  fmt::print("  Stock Locate: {}\n", msg->stock_locate());
++  print_timestamp(msg->timestamp());
++  print_oid(msg->oid());
++}
++
++void print_replace_order(const Itch::ReplaceOrder *msg) {
++  fmt::print("--- Replace Order ---\n");
++  fmt::print("  Stock Locate: {}\n", msg->stock_locate());
++  print_timestamp(msg->timestamp());
++  fmt::print("  Original OID: {}\n",
++             msg->original_oid() ? msg->original_oid()->id() : 0);
++  fmt::print("  New OID: {}\n", msg->new_oid() ? msg->new_oid()->id() : 0);
++  fmt::print("  New Quantity: {}\n",
++             msg->new_qty() ? msg->new_qty()->shares() : 0);
++  print_price(msg->new_price());
++}
++
++// --- End Printing Helpers ---
++
++// Function to handle order store operations based on message type
++void add_order_store(Itch::ItchMessage msg_type, const void *msg_ptr,
++                     OrderStore &order_store) {
++  switch (msg_type) {
++  case Itch::ItchMessage_AddOrder: {
++    auto add_order = static_cast<const Itch::AddOrder *>(msg_ptr);
++    if (add_order->oid() && add_order->qty() && add_order->price()) {
++      uint64_t order_id = add_order->oid()->id();
++      Order new_order{
++          order_id, add_order->price()->value(), add_order->qty()->shares(),
++          add_order->buy_sell(),
++          add_order->stock_symbol() ? add_order->stock_symbol()->str() : ""};
++      order_store[order_id] = new_order;
++    }
++    break;
++  }
++  case Itch::ItchMessage_AddOrderMpid: {
++    auto add_order_mpid = static_cast<const Itch::AddOrderMpid *>(msg_ptr);
++    if (add_order_mpid->add_order() && add_order_mpid->add_order()->oid() &&
++        add_order_mpid->add_order()->qty() &&
++        add_order_mpid->add_order()->price()) {
++      uint64_t order_id = add_order_mpid->add_order()->oid()->id();
++      Order new_order{order_id, add_order_mpid->add_order()->price()->value(),
++                      add_order_mpid->add_order()->qty()->shares(),
++                      add_order_mpid->add_order()->buy_sell(),
++                      add_order_mpid->add_order()->stock_symbol()
++                          ? add_order_mpid->add_order()->stock_symbol()->str()
++                          : ""};
++      order_store[order_id] = new_order;
++    }
++    break;
++  }
++  case Itch::ItchMessage_ExecuteOrder: {
++    auto execute_order = static_cast<const Itch::ExecuteOrder *>(msg_ptr);
++    if (execute_order->oid() && execute_order->qty()) {
++      uint64_t order_id = execute_order->oid()->id();
++      auto order_it = order_store.find(order_id);
++      if (order_it != order_store.end()) {
++        // Reduce quantity
++        uint32_t executed_qty = execute_order->qty()->shares();
++        if (executed_qty >= order_it->second.quantity) {
++          // Order fully executed, remove it
++          order_store.erase(order_it);
++        } else {
++          // Order partially executed, update quantity
++          order_it->second.quantity -= executed_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_ExecuteOrderWithPrice: {
++    auto execute_with_price =
++        static_cast<const Itch::ExecuteOrderWithPrice *>(msg_ptr);
++    if (execute_with_price->execute_order() &&
++        execute_with_price->execute_order()->oid() &&
++        execute_with_price->execute_order()->qty()) {
++      uint64_t order_id = execute_with_price->execute_order()->oid()->id();
++      auto order_it = order_store.find(order_id);
++      if (order_it != order_store.end()) {
++        // Reduce quantity
++        uint32_t executed_qty =
++            execute_with_price->execute_order()->qty()->shares();
++        if (executed_qty >= order_it->second.quantity) {
++          // Order fully executed, remove it
++          order_store.erase(order_it);
++        } else {
++          // Order partially executed, update quantity
++          order_it->second.quantity -= executed_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_ReduceOrder: {
++    auto reduce_order = static_cast<const Itch::ReduceOrder *>(msg_ptr);
++    if (reduce_order->oid() && reduce_order->qty()) {
++      uint64_t order_id = reduce_order->oid()->id();
++      auto order_it = order_store.find(order_id);
++      if (order_it != order_store.end()) {
++        // Reduce quantity
++        uint32_t reduced_qty = reduce_order->qty()->shares();
++        if (reduced_qty >= order_it->second.quantity) {
++          // Order fully canceled, remove it
++          order_store.erase(order_it);
++        } else {
++          // Order partially canceled, update quantity
++          order_it->second.quantity -= reduced_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_DeleteOrder: {
++    auto delete_order = static_cast<const Itch::DeleteOrder *>(msg_ptr);
++    if (delete_order->oid()) {
++      uint64_t order_id = delete_order->oid()->id();
++      order_store.erase(order_id);
++    }
++    break;
++  }
++  case Itch::ItchMessage_ReplaceOrder: {
++    auto replace_order = static_cast<const Itch::ReplaceOrder *>(msg_ptr);
++    if (replace_order->original_oid() && replace_order->new_oid() &&
++        replace_order->new_qty() && replace_order->new_price()) {
++      // Remove the original order
++      uint64_t original_id = replace_order->original_oid()->id();
++      auto original_order_it = order_store.find(original_id);
++
++      // Create the new order
++      uint64_t new_id = replace_order->new_oid()->id();
++
++      // If we found the original order, copy its side and symbol to the new
++      // order
++      if (original_order_it != order_store.end()) {
++        Order new_order{new_id, replace_order->new_price()->value(),
++                        replace_order->new_qty()->shares(),
++                        original_order_it->second.side,
++                        original_order_it->second.symbol};
++
++        // Remove original order and add new one
++        order_store.erase(original_order_it);
++        order_store[new_id] = new_order;
++      }
++      // Even if we didn't find the original order, we can still add the new one
++      // with default values for side/symbol
++      else {
++        Order new_order{new_id, replace_order->new_price()->value(),
++                        replace_order->new_qty()->shares(),
++                        Itch::BuySell_Unknown, ""};
++
++        order_store[new_id] = new_order;
++      }
++    }
++    break;
++  }
++  default:
++    // Other message types don't affect the order store
++    break;
++  }
++}
++
++// Function to handle order store operations based on message type using dense
++// map
++void add_order_store_dense(Itch::ItchMessage msg_type, const void *msg_ptr,
++                           OrderStoreDense &order_store) {
++  switch (msg_type) {
++  case Itch::ItchMessage_AddOrder: {
++    auto add_order = static_cast<const Itch::AddOrder *>(msg_ptr);
++    if (add_order->oid() && add_order->qty() && add_order->price()) {
++      uint64_t order_id = add_order->oid()->id();
++      Order new_order{
++          order_id, add_order->price()->value(), add_order->qty()->shares(),
++          add_order->buy_sell(),
++          add_order->stock_symbol() ? add_order->stock_symbol()->str() : ""};
++      order_store[order_id] = new_order;
++    }
++    break;
++  }
++  case Itch::ItchMessage_AddOrderMpid: {
++    auto add_order_mpid = static_cast<const Itch::AddOrderMpid *>(msg_ptr);
++    if (add_order_mpid->add_order() && add_order_mpid->add_order()->oid() &&
++        add_order_mpid->add_order()->qty() &&
++        add_order_mpid->add_order()->price()) {
++      uint64_t order_id = add_order_mpid->add_order()->oid()->id();
++      Order new_order{order_id, add_order_mpid->add_order()->price()->value(),
++                      add_order_mpid->add_order()->qty()->shares(),
++                      add_order_mpid->add_order()->buy_sell(),
++                      add_order_mpid->add_order()->stock_symbol()
++                          ? add_order_mpid->add_order()->stock_symbol()->str()
++                          : ""};
++      order_store[order_id] = new_order;
++    }
++    break;
++  }
++  case Itch::ItchMessage_ExecuteOrder: {
++    auto execute_order = static_cast<const Itch::ExecuteOrder *>(msg_ptr);
++    if (execute_order->oid() && execute_order->qty()) {
++      uint64_t order_id = execute_order->oid()->id();
++      auto order_it = order_store.find(order_id);
++      if (order_it != order_store.end()) {
++        // Reduce quantity
++        uint32_t executed_qty = execute_order->qty()->shares();
++        if (executed_qty >= order_it->second.quantity) {
++          // Order fully executed, remove it
++          order_store.erase(order_it);
++        } else {
++          // Order partially executed, update quantity
++          order_it->second.quantity -= executed_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_ExecuteOrderWithPrice: {
++    auto execute_with_price =
++        static_cast<const Itch::ExecuteOrderWithPrice *>(msg_ptr);
++    if (execute_with_price->execute_order() &&
++        execute_with_price->execute_order()->oid() &&
++        execute_with_price->execute_order()->qty()) {
++      uint64_t order_id = execute_with_price->execute_order()->oid()->id();
++      auto order_it = order_store.find(order_id);
++      if (order_it != order_store.end()) {
++        // Reduce quantity
++        uint32_t executed_qty =
++            execute_with_price->execute_order()->qty()->shares();
++        if (executed_qty >= order_it->second.quantity) {
++          // Order fully executed, remove it
++          order_store.erase(order_it);
++        } else {
++          // Order partially executed, update quantity
++          order_it->second.quantity -= executed_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_ReduceOrder: {
++    auto reduce_order = static_cast<const Itch::ReduceOrder *>(msg_ptr);
++    if (reduce_order->oid() && reduce_order->qty()) {
++      uint64_t order_id = reduce_order->oid()->id();
++      auto order_it = order_store.find(order_id);
++      if (order_it != order_store.end()) {
++        // Reduce quantity
++        uint32_t reduced_qty = reduce_order->qty()->shares();
++        if (reduced_qty >= order_it->second.quantity) {
++          // Order fully canceled, remove it
++          order_store.erase(order_it);
++        } else {
++          // Order partially canceled, update quantity
++          order_it->second.quantity -= reduced_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_DeleteOrder: {
++    auto delete_order = static_cast<const Itch::DeleteOrder *>(msg_ptr);
++    if (delete_order->oid()) {
++      uint64_t order_id = delete_order->oid()->id();
++      order_store.erase(order_id);
++    }
++    break;
++  }
++  case Itch::ItchMessage_ReplaceOrder: {
++    auto replace_order = static_cast<const Itch::ReplaceOrder *>(msg_ptr);
++    if (replace_order->original_oid() && replace_order->new_oid() &&
++        replace_order->new_qty() && replace_order->new_price()) {
++      // Remove the original order
++      uint64_t original_id = replace_order->original_oid()->id();
++      auto original_order_it = order_store.find(original_id);
++
++      // Create the new order
++      uint64_t new_id = replace_order->new_oid()->id();
++
++      // If we found the original order, copy its side and symbol to the new
++      // order
++      if (original_order_it != order_store.end()) {
++        Order new_order{new_id, replace_order->new_price()->value(),
++                        replace_order->new_qty()->shares(),
++                        original_order_it->second.side,
++                        original_order_it->second.symbol};
++
++        // Remove original order and add new one
++        order_store.erase(original_order_it);
++        order_store[new_id] = new_order;
++      }
++      // Even if we didn't find the original order, we can still add the new one
++      // with default values for side/symbol
++      else {
++        Order new_order{new_id, replace_order->new_price()->value(),
++                        replace_order->new_qty()->shares(),
++                        Itch::BuySell_Unknown, ""};
++
++        order_store[new_id] = new_order;
++      }
++    }
++    break;
++  }
++  default:
++    // Other message types don't affect the order store
++    break;
++  }
++}
++
++// Function to handle order store operations based on message type using vector
++void add_order_store_vector(Itch::ItchMessage msg_type, const void *msg_ptr,
++                            OrderStoreVector &order_store) {
++  switch (msg_type) {
++  case Itch::ItchMessage_AddOrder: {
++    auto add_order = static_cast<const Itch::AddOrder *>(msg_ptr);
++    if (add_order->oid() && add_order->qty() && add_order->price()) {
++      uint64_t order_id = add_order->oid()->id();
++      size_t index = static_cast<size_t>(order_id);
++
++      // Resize if needed
++      if (index >= order_store.size()) {
++        order_store.resize(index + 1);
++      }
++
++      Order new_order{
++          order_id, add_order->price()->value(), add_order->qty()->shares(),
++          add_order->buy_sell(),
++          add_order->stock_symbol() ? add_order->stock_symbol()->str() : ""};
++
++      order_store[index] = std::move(new_order);
++    }
++    break;
++  }
++  case Itch::ItchMessage_AddOrderMpid: {
++    auto add_order_mpid = static_cast<const Itch::AddOrderMpid *>(msg_ptr);
++    if (add_order_mpid->add_order() && add_order_mpid->add_order()->oid() &&
++        add_order_mpid->add_order()->qty() &&
++        add_order_mpid->add_order()->price()) {
++      uint64_t order_id = add_order_mpid->add_order()->oid()->id();
++      size_t index = static_cast<size_t>(order_id);
++
++      // Resize if needed
++      if (index >= order_store.size()) {
++        order_store.resize(index + 1);
++      }
++
++      Order new_order{order_id, add_order_mpid->add_order()->price()->value(),
++                      add_order_mpid->add_order()->qty()->shares(),
++                      add_order_mpid->add_order()->buy_sell(),
++                      add_order_mpid->add_order()->stock_symbol()
++                          ? add_order_mpid->add_order()->stock_symbol()->str()
++                          : ""};
++
++      order_store[index] = std::move(new_order);
++    }
++    break;
++  }
++  case Itch::ItchMessage_ExecuteOrder: {
++    auto execute_order = static_cast<const Itch::ExecuteOrder *>(msg_ptr);
++    if (execute_order->oid() && execute_order->qty()) {
++      uint64_t order_id = execute_order->oid()->id();
++      size_t index = static_cast<size_t>(order_id);
++
++      if (index < order_store.size() && order_store[index].has_value()) {
++        // Reduce quantity
++        uint32_t executed_qty = execute_order->qty()->shares();
++        if (executed_qty >= order_store[index]->quantity) {
++          // Order fully executed, remove it
++          order_store[index].reset();
++        } else {
++          // Order partially executed, update quantity
++          order_store[index]->quantity -= executed_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_ExecuteOrderWithPrice: {
++    auto execute_with_price =
++        static_cast<const Itch::ExecuteOrderWithPrice *>(msg_ptr);
++    if (execute_with_price->execute_order() &&
++        execute_with_price->execute_order()->oid() &&
++        execute_with_price->execute_order()->qty()) {
++      uint64_t order_id = execute_with_price->execute_order()->oid()->id();
++      size_t index = static_cast<size_t>(order_id);
++
++      if (index < order_store.size() && order_store[index].has_value()) {
++        // Reduce quantity
++        uint32_t executed_qty =
++            execute_with_price->execute_order()->qty()->shares();
++        if (executed_qty >= order_store[index]->quantity) {
++          // Order fully executed, remove it
++          order_store[index].reset();
++        } else {
++          // Order partially executed, update quantity
++          order_store[index]->quantity -= executed_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_ReduceOrder: {
++    auto reduce_order = static_cast<const Itch::ReduceOrder *>(msg_ptr);
++    if (reduce_order->oid() && reduce_order->qty()) {
++      uint64_t order_id = reduce_order->oid()->id();
++      size_t index = static_cast<size_t>(order_id);
++
++      if (index < order_store.size() && order_store[index].has_value()) {
++        // Reduce quantity
++        uint32_t reduced_qty = reduce_order->qty()->shares();
++        if (reduced_qty >= order_store[index]->quantity) {
++          // Order fully canceled, remove it
++          order_store[index].reset();
++        } else {
++          // Order partially canceled, update quantity
++          order_store[index]->quantity -= reduced_qty;
++        }
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_DeleteOrder: {
++    auto delete_order = static_cast<const Itch::DeleteOrder *>(msg_ptr);
++    if (delete_order->oid()) {
++      uint64_t order_id = delete_order->oid()->id();
++      size_t index = static_cast<size_t>(order_id);
++
++      if (index < order_store.size()) {
++        order_store[index].reset();
++      }
++    }
++    break;
++  }
++  case Itch::ItchMessage_ReplaceOrder: {
++    auto replace_order = static_cast<const Itch::ReplaceOrder *>(msg_ptr);
++    if (replace_order->original_oid() && replace_order->new_oid() &&
++        replace_order->new_qty() && replace_order->new_price()) {
++      // Get indices
++      uint64_t original_id = replace_order->original_oid()->id();
++      size_t original_index = static_cast<size_t>(original_id);
++      uint64_t new_id = replace_order->new_oid()->id();
++      size_t new_index = static_cast<size_t>(new_id);
++
++      // Default values for side and symbol
++      Itch::BuySell side = Itch::BuySell_Unknown;
++      std::string symbol = "";
++
++      // If we found the original order, copy its side and symbol
++      if (original_index < order_store.size() &&
++          order_store[original_index].has_value()) {
++        side = order_store[original_index]->side;
++        symbol = order_store[original_index]->symbol;
++
++        // Remove original order
++        order_store[original_index].reset();
++      }
++
++      // Resize if needed for new order
++      if (new_index >= order_store.size()) {
++        order_store.resize(new_index + 1);
++      }
++
++      // Create and store new order
++      Order new_order{new_id, replace_order->new_price()->value(),
++                      replace_order->new_qty()->shares(), side, symbol};
++
++      order_store[new_index] = std::move(new_order);
++    }
++    break;
++  }
++  default:
++    // Other message types don't affect the order store
++    break;
++  }
++}
++
++void process_fbs_buffer_no_store(const uint8_t *buffer_ptr, size_t size,
++                                 size_t line_num) {
++  flatbuffers::Verifier verifier(buffer_ptr, size);
++  if (!Itch::VerifyMessageContainerBuffer(verifier)) {
++    fmt::print(stderr,
++               "Error: Invalid FlatBuffers message on line {}. Skipping.\n",
++               line_num);
++    return;
++  }
++
++  auto container = flatbuffers::GetRoot<Itch::MessageContainer>(buffer_ptr);
++  auto msg_type = container->message_type();
++  const void *msg_ptr = container->message();
++
++  if (!msg_ptr) {
++    fmt::print(stderr, "Warning: Null message payload on line {}.\n", line_num);
++    return;
++  }
++
++  // Only print if we haven't reached the maximum number of messages to print
++  bool should_print = (processed_msg_count < max_messages_to_print);
++  if (should_print) {
++    processed_msg_count++;
++
++    switch (msg_type) {
++    case Itch::ItchMessage_AddOrder:
++      print_add_order(static_cast<const Itch::AddOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_AddOrderMpid:
++      print_add_order_mpid(static_cast<const Itch::AddOrderMpid *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrder:
++      print_execute_order(static_cast<const Itch::ExecuteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrderWithPrice:
++      print_execute_order_with_price(
++          static_cast<const Itch::ExecuteOrderWithPrice *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReduceOrder:
++      print_reduce_order(static_cast<const Itch::ReduceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_DeleteOrder:
++      print_delete_order(static_cast<const Itch::DeleteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReplaceOrder:
++      print_replace_order(static_cast<const Itch::ReplaceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_NONE:
++      fmt::print(stderr, "Warning: NONE message type encountered on line {}.\n",
++                 line_num);
++      break;
++    default:
++      fmt::print("--- Unhandled Message Type: {} ---\n",
++                 Itch::EnumNameItchMessage(msg_type));
++      break;
++    }
++    fmt::print("\n"); // Separator between messages
++  }
++}
++
++void process_fbs_buffer(const uint8_t *buffer_ptr, size_t size, size_t line_num,
++                        OrderStore &order_store) {
++  flatbuffers::Verifier verifier(buffer_ptr, size);
++  if (!Itch::VerifyMessageContainerBuffer(verifier)) {
++    fmt::print(stderr,
++               "Error: Invalid FlatBuffers message on line {}. Skipping.\n",
++               line_num);
++    return;
++  }
++
++  auto container = flatbuffers::GetRoot<Itch::MessageContainer>(buffer_ptr);
++  auto msg_type = container->message_type();
++  const void *msg_ptr = container->message();
++
++  if (!msg_ptr) {
++    fmt::print(stderr, "Warning: Null message payload on line {}.\n", line_num);
++    return;
++  }
++
++  // Process the message for order store - do this for all messages
++  add_order_store(msg_type, msg_ptr, order_store);
++
++  // Only print if we haven't reached the maximum number of messages to print
++  bool should_print = (processed_msg_count < max_messages_to_print);
++  if (should_print) {
++    processed_msg_count++;
++
++    switch (msg_type) {
++    case Itch::ItchMessage_AddOrder:
++      print_add_order(static_cast<const Itch::AddOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_AddOrderMpid:
++      print_add_order_mpid(static_cast<const Itch::AddOrderMpid *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrder:
++      print_execute_order(static_cast<const Itch::ExecuteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrderWithPrice:
++      print_execute_order_with_price(
++          static_cast<const Itch::ExecuteOrderWithPrice *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReduceOrder:
++      print_reduce_order(static_cast<const Itch::ReduceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_DeleteOrder:
++      print_delete_order(static_cast<const Itch::DeleteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReplaceOrder:
++      print_replace_order(static_cast<const Itch::ReplaceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_NONE:
++      fmt::print(stderr, "Warning: NONE message type encountered on line {}.\n",
++                 line_num);
++      break;
++    default:
++      fmt::print("--- Unhandled Message Type: {} ---\n",
++                 Itch::EnumNameItchMessage(msg_type));
++      break;
++    }
++    fmt::print("\n"); // Separator between messages
++  }
++}
++
++// Process FBS buffer with dense order store
++void process_fbs_buffer_dense(const uint8_t *buffer_ptr, size_t size,
++                              size_t line_num, OrderStoreDense &order_store) {
++  flatbuffers::Verifier verifier(buffer_ptr, size);
++  if (!Itch::VerifyMessageContainerBuffer(verifier)) {
++    fmt::print(stderr,
++               "Error: Invalid FlatBuffers message on line {}. Skipping.\n",
++               line_num);
++    return;
++  }
++
++  auto container = flatbuffers::GetRoot<Itch::MessageContainer>(buffer_ptr);
++  auto msg_type = container->message_type();
++  const void *msg_ptr = container->message();
++
++  if (!msg_ptr) {
++    fmt::print(stderr, "Warning: Null message payload on line {}.\n", line_num);
++    return;
++  }
++
++  // Process the message for order store - do this for all messages
++  add_order_store_dense(msg_type, msg_ptr, order_store);
++
++  // Only print if we haven't reached the maximum number of messages to print
++  bool should_print = (processed_msg_count < max_messages_to_print);
++  if (should_print) {
++    processed_msg_count++;
++
++    switch (msg_type) {
++    case Itch::ItchMessage_AddOrder:
++      print_add_order(static_cast<const Itch::AddOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_AddOrderMpid:
++      print_add_order_mpid(static_cast<const Itch::AddOrderMpid *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrder:
++      print_execute_order(static_cast<const Itch::ExecuteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrderWithPrice:
++      print_execute_order_with_price(
++          static_cast<const Itch::ExecuteOrderWithPrice *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReduceOrder:
++      print_reduce_order(static_cast<const Itch::ReduceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_DeleteOrder:
++      print_delete_order(static_cast<const Itch::DeleteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReplaceOrder:
++      print_replace_order(static_cast<const Itch::ReplaceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_NONE:
++      fmt::print(stderr, "Warning: NONE message type encountered on line {}.\n",
++                 line_num);
++      break;
++    default:
++      fmt::print("--- Unhandled Message Type: {} ---\n",
++                 Itch::EnumNameItchMessage(msg_type));
++      break;
++    }
++    fmt::print("\n"); // Separator between messages
++  }
++}
++
++// Process FBS buffer with vector order store
++void process_fbs_buffer_vector(const uint8_t *buffer_ptr, size_t size,
++                               size_t line_num, OrderStoreVector &order_store) {
++  flatbuffers::Verifier verifier(buffer_ptr, size);
++  if (!Itch::VerifyMessageContainerBuffer(verifier)) {
++    fmt::print(stderr,
++               "Error: Invalid FlatBuffers message on line {}. Skipping.\n",
++               line_num);
++    return;
++  }
++
++  auto container = flatbuffers::GetRoot<Itch::MessageContainer>(buffer_ptr);
++  auto msg_type = container->message_type();
++  const void *msg_ptr = container->message();
++
++  if (!msg_ptr) {
++    fmt::print(stderr, "Warning: Null message payload on line {}.\n", line_num);
++    return;
++  }
++
++  // Process the message for order store - do this for all messages
++  add_order_store_vector(msg_type, msg_ptr, order_store);
++
++  // Only print if we haven't reached the maximum number of messages to print
++  bool should_print = (processed_msg_count < max_messages_to_print);
++  if (should_print) {
++    processed_msg_count++;
++
++    switch (msg_type) {
++    case Itch::ItchMessage_AddOrder:
++      print_add_order(static_cast<const Itch::AddOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_AddOrderMpid:
++      print_add_order_mpid(static_cast<const Itch::AddOrderMpid *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrder:
++      print_execute_order(static_cast<const Itch::ExecuteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ExecuteOrderWithPrice:
++      print_execute_order_with_price(
++          static_cast<const Itch::ExecuteOrderWithPrice *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReduceOrder:
++      print_reduce_order(static_cast<const Itch::ReduceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_DeleteOrder:
++      print_delete_order(static_cast<const Itch::DeleteOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_ReplaceOrder:
++      print_replace_order(static_cast<const Itch::ReplaceOrder *>(msg_ptr));
++      break;
++    case Itch::ItchMessage_NONE:
++      fmt::print(stderr, "Warning: NONE message type encountered on line {}.\n",
++                 line_num);
++      break;
++    default:
++      fmt::print("--- Unhandled Message Type: {} ---\n",
++                 Itch::EnumNameItchMessage(msg_type));
++      break;
++    }
++    fmt::print("\n"); // Separator between messages
++  }
++}
++
++// Process FBS buffer without any decoding, just verifying format
++void process_fbs_buffer_no_decoding(const uint8_t *buffer_ptr, size_t size,
++                                    size_t line_num) {
++  flatbuffers::Verifier verifier(buffer_ptr, size);
++  if (!Itch::VerifyMessageContainerBuffer(verifier)) {
++    fmt::print(stderr,
++               "Error: Invalid FlatBuffers message on line {}. Skipping.\n",
++               line_num);
++    return;
++  }
++
++  // We just verify the buffer is valid - no decoding, no message-specific work
++}
++
++void print_usage(const char *prog_name) {
++  fmt::print(stderr, "Usage: {} -i <input_hex_fbs_file>\n", prog_name);
++  fmt::print(stderr,
++             "  -i <input_hex_fbs_file>: Path to the input file containing "
++             "hex-encoded FlatBuffers per line (required).\n");
++}
++
++// Core template function for processing flatbuffers
++template <typename State, typename ProcessFunc, typename ReportFunc>
++double load_and_process_template(const char *input_path,
++                                 const std::string &description,
++                                 State init_state, bool reset_counters,
++                                 ProcessFunc process_func,
++                                 ReportFunc report_func) {
++
++  fmt::print("\n[{}]\n", description);
++  fmt::print("Reading FlatBuffers messages from: {}\n", input_path);
++
++  std::ifstream input_file(input_path);
++  if (!input_file) {
++    fmt::print(stderr, "Error opening input file: {}\n", input_path);
++    return -1.0;
++  }
++
++  // Reset counters if needed
++  if (reset_counters) {
++    processed_msg_count = 0;
++  }
++
++  // State for processing
++  State state = init_state;
++
++  // Start timing
++  auto start_time = std::chrono::high_resolution_clock::now();
++
++  std::string hex_line;
++  size_t line_num = 0;
++  size_t total_processed = 0;
++
++  while (std::getline(input_file, hex_line)) {
++    line_num++;
++    if (hex_line.empty())
++      continue; // Skip empty lines
++
++    try {
++      std::vector<uint8_t> byte_buffer = hex_string_to_bytes(hex_line);
++      if (!byte_buffer.empty()) {
++        process_func(byte_buffer.data(), byte_buffer.size(), line_num, state);
++        total_processed++;
++      }
++    } catch (const std::runtime_error &e) {
++      fmt::print(stderr, "Error processing line {}: {}\n", line_num, e.what());
++    }
++  }
++
++  // End timing
++  auto end_time = std::chrono::high_resolution_clock::now();
++  auto total_duration = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                            end_time - start_time)
++                            .count();
++
++  // Calculate ns per operation
++  double ns_per_op = total_processed > 0
++                         ? static_cast<double>(total_duration) / total_processed
++                         : 0.0;
++
++  // Report results
++  report_func(total_processed, total_duration, ns_per_op, state);
++
++  return ns_per_op;
++}
++
++// Function to load and process flatbuffers file without any decoding (just
++// verification)
++double load_flatbuffers_no_decoding(const char *input_path) {
++  return load_and_process_template<std::monostate>(
++      input_path, "Running with No Decoding - Just Verification",
++      std::monostate{},
++      false, // Don't reset counters for this mode
++
++      // Process function
++      [](const uint8_t *buffer, size_t size, size_t line_num,
++         std::monostate &) {
++        process_fbs_buffer_no_decoding(buffer, size, line_num);
++      },
++
++      // Report function
++      [](size_t total_processed, uint64_t total_duration, double ns_per_op,
++         const std::monostate &) {
++        fmt::print("Finished processing {} messages.\n", total_processed);
++        fmt::print("Processing time: {:.2f} ms ({} ns)\n",
++                   total_duration / 1000000.0, total_duration);
++        fmt::print("Performance: {:.2f} ns/op\n", ns_per_op);
++      });
++}
++
++// Function to load and process flatbuffers file without using the order store
++double load_flatbuffers_no_store(const char *input_path) {
++  return load_and_process_template<std::monostate>(
++      input_path, "Running without Order Store", std::monostate{},
++      true, // Reset counters
++
++      // Process function
++      [](const uint8_t *buffer, size_t size, size_t line_num,
++         std::monostate &) {
++        process_fbs_buffer_no_store(buffer, size, line_num);
++      },
++
++      // Report function
++      [](size_t total_processed, uint64_t total_duration, double ns_per_op,
++         const std::monostate &) {
++        fmt::print("Finished processing {} messages (printed first {}).\n",
++                   total_processed,
++                   std::min(total_processed, max_messages_to_print));
++        fmt::print("Processing time: {:.2f} ms ({} ns)\n",
++                   total_duration / 1000000.0, total_duration);
++        fmt::print("Performance: {:.2f} ns/op\n", ns_per_op);
++      });
++}
++
++// Function to load and process flatbuffers file with order store
++double load_flatbuffers(const char *input_path) {
++  return load_and_process_template<OrderStore>(
++      input_path, "Running with Order Store (std::unordered_map)", OrderStore{},
++      true, // Reset counters
++
++      // Process function
++      [](const uint8_t *buffer, size_t size, size_t line_num,
++         OrderStore &order_store) {
++        process_fbs_buffer(buffer, size, line_num, order_store);
++      },
++
++      // Report function
++      [](size_t total_processed, uint64_t total_duration, double ns_per_op,
++         const OrderStore &order_store) {
++        fmt::print("Finished processing {} messages (printed first {}).\n",
++                   total_processed,
++                   std::min(total_processed, max_messages_to_print));
++        fmt::print("Processing time: {:.2f} ms ({} ns)\n",
++                   total_duration / 1000000.0, total_duration);
++        fmt::print("Performance: {:.2f} ns/op\n", ns_per_op);
++        fmt::print("Order store final size: {} orders\n", order_store.size());
++      });
++}
++
++// Function to load and process flatbuffers file with dense order store
++double load_flatbuffers_dense(const char *input_path) {
++  return load_and_process_template<OrderStoreDense>(
++      input_path, "Running with Order Store (phmap::flat_hash_map)",
++      OrderStoreDense{},
++      true, // Reset counters
++
++      // Process function
++      [](const uint8_t *buffer, size_t size, size_t line_num,
++         OrderStoreDense &order_store) {
++        process_fbs_buffer_dense(buffer, size, line_num, order_store);
++      },
++
++      // Report function
++      [](size_t total_processed, uint64_t total_duration, double ns_per_op,
++         const OrderStoreDense &order_store) {
++        fmt::print("Finished processing {} messages (printed first {}).\n",
++                   total_processed,
++                   std::min(total_processed, max_messages_to_print));
++        fmt::print("Processing time: {:.2f} ms ({} ns)\n",
++                   total_duration / 1000000.0, total_duration);
++        fmt::print("Performance: {:.2f} ns/op\n", ns_per_op);
++        fmt::print("Order store final size: {} orders\n", order_store.size());
++      });
++}
++
++// Function to load and process flatbuffers file with vector order store
++double load_flatbuffers_vector(const char *input_path) {
++  return load_and_process_template<OrderStoreVector>(
++      input_path, "Running with Order Store (std::vector)", OrderStoreVector{},
++      true, // Reset counters
++
++      // Process function
++      [](const uint8_t *buffer, size_t size, size_t line_num,
++         OrderStoreVector &order_store) {
++        process_fbs_buffer_vector(buffer, size, line_num, order_store);
++      },
++
++      // Report function
++      [](size_t total_processed, uint64_t total_duration, double ns_per_op,
++         const OrderStoreVector &order_store) {
++        fmt::print("Finished processing {} messages (printed first {}).\n",
++                   total_processed,
++                   std::min(total_processed, max_messages_to_print));
++        fmt::print("Processing time: {:.2f} ms ({} ns)\n",
++                   total_duration / 1000000.0, total_duration);
++        fmt::print("Performance: {:.2f} ns/op\n", ns_per_op);
++
++        // Count active orders (non-nullopt elements)
++        size_t active_orders = 0;
++        for (const auto &opt_order : order_store) {
++          if (opt_order.has_value()) {
++            active_orders++;
++          }
++        }
++
++        fmt::print("Order store final size: {} (vector capacity: {}, active "
++                   "orders: {})\n",
++                   order_store.size(), order_store.capacity(), active_orders);
++      });
++}
++
++} // namespace itch_parser
++
++int main(int argc, char *argv[]) {
++  const char *input_path = nullptr;
++  int opt;
++
++  while ((opt = getopt(argc, argv, "i:")) != -1) {
++    switch (opt) {
++    case 'i':
++      input_path = optarg;
++      break;
++    case '?':
++    default:
++      itch_parser::print_usage(argv[0]);
++      return 1;
++    }
++  }
++
++  if (!input_path) {
++    fmt::print(stderr, "Error: Input file path (-i) is required.\n");
++    itch_parser::print_usage(argv[0]);
++    return 1;
++  }
++
++  // Run baseline first (just verification, no decoding)
++  double no_decoding_ns_per_op =
++      itch_parser::load_flatbuffers_no_decoding(input_path);
++  if (no_decoding_ns_per_op < 0) {
++    return 1;
++  }
++
++  // Run all other functions and compare performance
++  double no_store_ns_per_op =
++      itch_parser::load_flatbuffers_no_store(input_path);
++  if (no_store_ns_per_op < 0) {
++    return 1;
++  }
++
++  double with_store_ns_per_op = itch_parser::load_flatbuffers(input_path);
++  if (with_store_ns_per_op < 0) {
++    return 1;
++  }
++
++  double with_dense_store_ns_per_op =
++      itch_parser::load_flatbuffers_dense(input_path);
++  if (with_dense_store_ns_per_op < 0) {
++    return 1;
++  }
++
++  double with_vector_store_ns_per_op =
++      itch_parser::load_flatbuffers_vector(input_path);
++  if (with_vector_store_ns_per_op < 0) {
++    return 1;
++  }
++
++  // Calculate and print the performance differences
++  fmt::print("\n[Performance Comparison]\n");
++  fmt::print("Just verification (no decoding):           {:.2f} ns/op\n",
++             no_decoding_ns_per_op);
++  fmt::print("Without order store:                       {:.2f} ns/op\n",
++             no_store_ns_per_op);
++  fmt::print("With std::unordered_map:                   {:.2f} ns/op\n",
++             with_store_ns_per_op);
++  fmt::print("With phmap::flat_hash_map:                 {:.2f} ns/op\n",
++             with_dense_store_ns_per_op);
++  fmt::print("With std::vector:                          {:.2f} ns/op\n",
++             with_vector_store_ns_per_op);
++
++  fmt::print("\n[Overhead Analysis vs. No Decoding]\n");
++
++  double decode_overhead_ns = no_store_ns_per_op - no_decoding_ns_per_op;
++  double decode_overhead_percent =
++      (decode_overhead_ns / no_decoding_ns_per_op) * 100.0;
++  fmt::print(
++      "Message decoding overhead:                 +{:.2f} ns/op (+{:.2f}%)\n",
++      decode_overhead_ns, decode_overhead_percent);
++
++  double std_total_overhead_ns = with_store_ns_per_op - no_decoding_ns_per_op;
++  double std_total_overhead_percent =
++      (std_total_overhead_ns / no_decoding_ns_per_op) * 100.0;
++  fmt::print(
++      "std::unordered_map total overhead:         +{:.2f} ns/op (+{:.2f}%)\n",
++      std_total_overhead_ns, std_total_overhead_percent);
++
++  double dense_total_overhead_ns =
++      with_dense_store_ns_per_op - no_decoding_ns_per_op;
++  double dense_total_overhead_percent =
++      (dense_total_overhead_ns / no_decoding_ns_per_op) * 100.0;
++  fmt::print(
++      "phmap::flat_hash_map total overhead:         +{:.2f} ns/op (+{:.2f}%)\n",
++      dense_total_overhead_ns, dense_total_overhead_percent);
++
++  double vector_total_overhead_ns =
++      with_vector_store_ns_per_op - no_decoding_ns_per_op;
++  double vector_total_overhead_percent =
++      (vector_total_overhead_ns / no_decoding_ns_per_op) * 100.0;
++  fmt::print(
++      "std::vector total overhead:                 +{:.2f} ns/op (+{:.2f}%)\n",
++      vector_total_overhead_ns, vector_total_overhead_percent);
++
++  fmt::print("\n[Overhead Analysis vs. No Store]\n");
++  double std_overhead_ns = with_store_ns_per_op - no_store_ns_per_op;
++  double std_overhead_percent = (std_overhead_ns / no_store_ns_per_op) * 100.0;
++  fmt::print(
++      "std::unordered_map storage overhead:       +{:.2f} ns/op (+{:.2f}%)\n",
++      std_overhead_ns, std_overhead_percent);
++
++  double dense_overhead_ns = with_dense_store_ns_per_op - no_store_ns_per_op;
++  double dense_overhead_percent =
++      (dense_overhead_ns / no_store_ns_per_op) * 100.0;
++  fmt::print("phmap::flat_hash_map storage overhead:       +{:.2f} ns/op "
++             "(+{:.2f}%)\n",
++             dense_overhead_ns, dense_overhead_percent);
++
++  double vector_overhead_ns = with_vector_store_ns_per_op - no_store_ns_per_op;
++  double vector_overhead_percent =
++      (vector_overhead_ns / no_store_ns_per_op) * 100.0;
++  fmt::print("std::vector storage overhead:             +{:.2f} ns/op "
++             "(+{:.2f}%)\n",
++             vector_overhead_ns, vector_overhead_percent);
++
++  double dense_improvement_ns =
++      with_store_ns_per_op - with_dense_store_ns_per_op;
++  double dense_improvement_percent =
++      (dense_improvement_ns / with_store_ns_per_op) * 100.0;
++  fmt::print(
++      "phmap::flat_hash_map improvement vs std:    -{:.2f} ns/op (-{:.2f}%)\n",
++      dense_improvement_ns, dense_improvement_percent);
++
++  double vector_vs_map_diff =
++      with_store_ns_per_op - with_vector_store_ns_per_op;
++  double vector_vs_map_percent =
++      (vector_vs_map_diff / with_store_ns_per_op) * 100.0;
++  fmt::print(
++      "std::vector vs std::unordered_map:         {:.2f} ns/op ({:.2f}%)\n",
++      vector_vs_map_diff, vector_vs_map_percent);
++
++  double vector_vs_dense_diff =
++      with_dense_store_ns_per_op - with_vector_store_ns_per_op;
++  double vector_vs_dense_percent =
++      (vector_vs_dense_diff / with_dense_store_ns_per_op) * 100.0;
++  fmt::print(
++      "std::vector vs phmap::flat_hash_map:        {:.2f} ns/op ({:.2f}%)\n",
++      vector_vs_dense_diff, vector_vs_dense_percent);
++
++  return 0;
++}
+\ No newline at end of file
+diff --git a/itch-order-book/src/main.cpp b/itch-order-book/src/main.cpp
+new file mode 100644
+index 0000000..75a8877
+--- /dev/null
++++ b/itch-order-book/src/main.cpp
+@@ -0,0 +1,689 @@
++// clang-format off
++#include <cerrno> // For errno
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <fcntl.h> // For file flags (O_RDONLY, O_WRONLY, etc.)
++#include <fmt/core.h>
++#include <fmt/format.h>
++#include <getopt.h> // For argument parsing
++#include <iostream>
++#include <limits>
++#include <memory>
++#include <string>
++#include <unistd.h> // For open, close, write, getopt
++#include <unordered_map>
++#include <vector>
++
++#include <fb_schema/schema_itch_generated.h>
++
++#include "bufferedreader.h"
++#include "itch.h"
++#include "order_book.h"
++
++// clang-format on
++
++// --- Compile-Time Configuration ---
++struct kConst {
++  static constexpr bool BUILD_FLATBUFFER = true;
++  static constexpr bool OUTPUT_HEX = true;
++  static constexpr bool WRITE_TO_FILE = true;
++};
++// --- End Compile-Time Configuration ---
++
++template <itch_t __code> class PROCESS {
++public:
++  static itch_message<__code> read_from(buf_t *__buf) {
++    uint16_t const msglen = be16toh(*(uint16_t *)__buf->get(0));
++    __buf->advance(2);
++    assert(msglen == netlen<__code>);
++
++    __buf->ensure(netlen<__code>);
++    itch_message<__code> ret = itch_message<__code>::parse(__buf->get(0));
++    __buf->advance(netlen<__code>);
++    return ret;
++  }
++};
++
++static sprice_t mksigned(price_t price, BUY_SELL buy) {
++  assert(MKPRIMITIVE(price) < std::numeric_limits<int32_t>::max());
++  auto ret = MKPRIMITIVE(price);
++  if (BUY_SELL::SELL == buy)
++    ret = -ret;
++  return sprice_t(ret);
++}
++
++// Helper to append raw bytes + newline to a memory buffer
++void write_raw_bytes(fmt::memory_buffer &buf, const uint8_t *buffer,
++                     size_t size) {
++  buf.append(buffer, buffer + size);
++  buf.push_back('\n');
++}
++
++// Helper to print buffer as hex using fmt, appending to a memory buffer
++// Uses a lookup table for faster hex conversion.
++void print_hex_fmt(fmt::memory_buffer &buf, const uint8_t *buffer,
++                   size_t size) {
++  static constexpr char hex_chars[] = "0123456789abcdef";
++  buf.reserve(buf.size() + size * 2 + 1);
++
++  for (size_t i = 0; i < size; ++i) {
++    uint8_t b = buffer[i];
++    buf.push_back(hex_chars[(b >> 4) & 0x0F]);
++    buf.push_back(hex_chars[b & 0x0F]);
++  }
++  buf.push_back('\n');
++}
++
++// Helper to map C++ BUY_SELL to FlatBuffers BuySell
++Itch::BuySell map_buysell(BUY_SELL cpp_bs) {
++  switch (cpp_bs) {
++  case BUY_SELL::BUY:
++    return Itch::BuySell_Buy;
++  case BUY_SELL::SELL:
++    return Itch::BuySell_Sell;
++  default:
++    return Itch::BuySell_Unknown;
++  }
++}
++
++// --- Start Refactored FlatBuffers Serialization ---
++
++// Forward declaration for the main serialization function
++template <itch_t MsgType>
++inline void serialize_and_print( // Renamed from serialize_and_print_hex
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<MsgType> &pkt);
++
++// Specializations with compile-time checks
++template <>
++inline void serialize_and_print<itch_t::ADD_ORDER>(
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<itch_t::ADD_ORDER> &pkt) {
++  if constexpr (kConst::BUILD_FLATBUFFER) {
++    auto fb_ts =
++        Itch::CreateTimestamp(builder, static_cast<uint64_t>(pkt.timestamp));
++    auto fb_oid = Itch::CreateOid(builder, static_cast<uint64_t>(pkt.oid));
++    auto fb_qty = Itch::CreateQty(builder, static_cast<uint32_t>(pkt.qty));
++
++    // Convert stock_locate directly to string
++    auto fb_stock_symbol =
++        builder.CreateString(std::to_string(pkt.stock_locate));
++
++    auto fb_price =
++        Itch::CreatePrice(builder, static_cast<uint32_t>(pkt.price));
++    auto fb_buysell = map_buysell(pkt.buy);
++    auto add_order_offset =
++        Itch::CreateAddOrder(builder, pkt.stock_locate, fb_ts, fb_oid,
++                             fb_buysell, fb_qty, fb_stock_symbol, fb_price);
++    auto msg_offset = Itch::CreateMessageContainer(
++        builder, Itch::ItchMessage_AddOrder, add_order_offset.Union());
++    builder.Finish(msg_offset);
++    if constexpr (kConst::WRITE_TO_FILE) {
++      if constexpr (kConst::OUTPUT_HEX) {
++        print_hex_fmt(output_buffer, builder.GetBufferPointer(),
++                      builder.GetSize());
++      } else {
++        write_raw_bytes(output_buffer, builder.GetBufferPointer(),
++                        builder.GetSize());
++      }
++    }
++  } else if constexpr (kConst::WRITE_TO_FILE) {
++    output_buffer.push_back('\n');
++  }
++}
++
++template <>
++inline void serialize_and_print<itch_t::ADD_ORDER_MPID>(
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<itch_t::ADD_ORDER_MPID> &pkt) {
++  if constexpr (kConst::BUILD_FLATBUFFER) {
++    auto fb_ts = Itch::CreateTimestamp(
++        builder, static_cast<uint64_t>(pkt.add_msg.timestamp));
++    auto fb_oid =
++        Itch::CreateOid(builder, static_cast<uint64_t>(pkt.add_msg.oid));
++    auto fb_qty =
++        Itch::CreateQty(builder, static_cast<uint32_t>(pkt.add_msg.qty));
++
++    // Convert stock_locate directly to string
++    auto fb_stock_symbol =
++        builder.CreateString(std::to_string(pkt.add_msg.stock_locate));
++
++    auto fb_price =
++        Itch::CreatePrice(builder, static_cast<uint32_t>(pkt.add_msg.price));
++    auto fb_buysell = map_buysell(pkt.add_msg.buy);
++    auto fb_mpid = builder.CreateString("XXXX");
++    auto add_order_offset =
++        Itch::CreateAddOrder(builder, pkt.add_msg.stock_locate, fb_ts, fb_oid,
++                             fb_buysell, fb_qty, fb_stock_symbol, fb_price);
++    auto add_order_mpid_offset =
++        Itch::CreateAddOrderMpid(builder, add_order_offset, fb_mpid);
++    auto msg_offset = Itch::CreateMessageContainer(
++        builder, Itch::ItchMessage_AddOrderMpid, add_order_mpid_offset.Union());
++    builder.Finish(msg_offset);
++    if constexpr (kConst::WRITE_TO_FILE) {
++      if constexpr (kConst::OUTPUT_HEX) {
++        print_hex_fmt(output_buffer, builder.GetBufferPointer(),
++                      builder.GetSize());
++      } else {
++        write_raw_bytes(output_buffer, builder.GetBufferPointer(),
++                        builder.GetSize());
++      }
++    }
++  } else if constexpr (kConst::WRITE_TO_FILE) {
++    output_buffer.push_back('\n');
++  }
++}
++
++template <>
++inline void serialize_and_print<itch_t::EXECUTE_ORDER>(
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<itch_t::EXECUTE_ORDER> &pkt) {
++  if constexpr (kConst::BUILD_FLATBUFFER) {
++    auto fb_ts =
++        Itch::CreateTimestamp(builder, static_cast<uint64_t>(pkt.timestamp));
++    auto fb_oid = Itch::CreateOid(builder, static_cast<uint64_t>(pkt.oid));
++    auto fb_qty = Itch::CreateQty(builder, static_cast<uint32_t>(pkt.qty));
++    uint64_t match_num = 0;
++    auto exec_order_offset = Itch::CreateExecuteOrder(
++        builder, pkt.stock_locate, fb_ts, fb_oid, fb_qty, match_num);
++    auto msg_offset = Itch::CreateMessageContainer(
++        builder, Itch::ItchMessage_ExecuteOrder, exec_order_offset.Union());
++    builder.Finish(msg_offset);
++    if constexpr (kConst::WRITE_TO_FILE) {
++      if constexpr (kConst::OUTPUT_HEX) {
++        print_hex_fmt(output_buffer, builder.GetBufferPointer(),
++                      builder.GetSize());
++      } else {
++        write_raw_bytes(output_buffer, builder.GetBufferPointer(),
++                        builder.GetSize());
++      }
++    }
++  } else if constexpr (kConst::WRITE_TO_FILE) {
++    output_buffer.push_back('\n');
++  }
++}
++
++template <>
++inline void serialize_and_print<itch_t::EXECUTE_ORDER_WITH_PRICE>(
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<itch_t::EXECUTE_ORDER_WITH_PRICE> &pkt) {
++  if constexpr (kConst::BUILD_FLATBUFFER) {
++    auto fb_ts = Itch::CreateTimestamp(
++        builder, static_cast<uint64_t>(pkt.exec.timestamp));
++    auto fb_oid = Itch::CreateOid(builder, static_cast<uint64_t>(pkt.exec.oid));
++    auto fb_qty = Itch::CreateQty(builder, static_cast<uint32_t>(pkt.exec.qty));
++    uint64_t match_num_exec = 0;
++    auto exec_order_offset = Itch::CreateExecuteOrder(
++        builder, pkt.exec.stock_locate, fb_ts, fb_oid, fb_qty, match_num_exec);
++    bool printable = false;
++    auto fb_price = Itch::CreatePrice(builder, 0);
++    uint64_t match_num_with_price = 0;
++    auto exec_with_price_offset = Itch::CreateExecuteOrderWithPrice(
++        builder, exec_order_offset, printable, fb_price, match_num_with_price);
++    auto msg_offset = Itch::CreateMessageContainer(
++        builder, Itch::ItchMessage_ExecuteOrderWithPrice,
++        exec_with_price_offset.Union());
++    builder.Finish(msg_offset);
++    if constexpr (kConst::WRITE_TO_FILE) {
++      if constexpr (kConst::OUTPUT_HEX) {
++        print_hex_fmt(output_buffer, builder.GetBufferPointer(),
++                      builder.GetSize());
++      } else {
++        write_raw_bytes(output_buffer, builder.GetBufferPointer(),
++                        builder.GetSize());
++      }
++    }
++  } else if constexpr (kConst::WRITE_TO_FILE) {
++    output_buffer.push_back('\n');
++  }
++}
++
++template <>
++inline void serialize_and_print<itch_t::REDUCE_ORDER>(
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<itch_t::REDUCE_ORDER> &pkt) {
++  if constexpr (kConst::BUILD_FLATBUFFER) {
++    auto fb_ts =
++        Itch::CreateTimestamp(builder, static_cast<uint64_t>(pkt.timestamp));
++    auto fb_oid = Itch::CreateOid(builder, static_cast<uint64_t>(pkt.oid));
++    auto fb_qty = Itch::CreateQty(builder, static_cast<uint32_t>(pkt.qty));
++    uint16_t stock_locate = 0;
++    auto reduce_order_offset =
++        Itch::CreateReduceOrder(builder, stock_locate, fb_ts, fb_oid, fb_qty);
++    auto msg_offset = Itch::CreateMessageContainer(
++        builder, Itch::ItchMessage_ReduceOrder, reduce_order_offset.Union());
++    builder.Finish(msg_offset);
++    if constexpr (kConst::WRITE_TO_FILE) {
++      if constexpr (kConst::OUTPUT_HEX) {
++        print_hex_fmt(output_buffer, builder.GetBufferPointer(),
++                      builder.GetSize());
++      } else {
++        write_raw_bytes(output_buffer, builder.GetBufferPointer(),
++                        builder.GetSize());
++      }
++    }
++  } else if constexpr (kConst::WRITE_TO_FILE) {
++    output_buffer.push_back('\n');
++  }
++}
++
++template <>
++inline void serialize_and_print<itch_t::DELETE_ORDER>(
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<itch_t::DELETE_ORDER> &pkt) {
++  if constexpr (kConst::BUILD_FLATBUFFER) {
++    auto fb_ts =
++        Itch::CreateTimestamp(builder, static_cast<uint64_t>(pkt.timestamp));
++    auto fb_oid = Itch::CreateOid(builder, static_cast<uint64_t>(pkt.oid));
++    uint16_t stock_locate = 0;
++    auto delete_order_offset =
++        Itch::CreateDeleteOrder(builder, stock_locate, fb_ts, fb_oid);
++    auto msg_offset = Itch::CreateMessageContainer(
++        builder, Itch::ItchMessage_DeleteOrder, delete_order_offset.Union());
++    builder.Finish(msg_offset);
++    if constexpr (kConst::WRITE_TO_FILE) {
++      if constexpr (kConst::OUTPUT_HEX) {
++        print_hex_fmt(output_buffer, builder.GetBufferPointer(),
++                      builder.GetSize());
++      } else {
++        write_raw_bytes(output_buffer, builder.GetBufferPointer(),
++                        builder.GetSize());
++      }
++    }
++  } else if constexpr (kConst::WRITE_TO_FILE) {
++    output_buffer.push_back('\n');
++  }
++}
++
++template <>
++inline void serialize_and_print<itch_t::REPLACE_ORDER>(
++    fmt::memory_buffer &output_buffer, flatbuffers::FlatBufferBuilder &builder,
++    const itch_message<itch_t::REPLACE_ORDER> &pkt) {
++  if constexpr (kConst::BUILD_FLATBUFFER) {
++    auto fb_ts = Itch::CreateTimestamp(builder, 0);
++    auto fb_orig_oid = Itch::CreateOid(builder, static_cast<uint64_t>(pkt.oid));
++    auto fb_new_oid =
++        Itch::CreateOid(builder, static_cast<uint64_t>(pkt.new_order_id));
++    auto fb_new_qty =
++        Itch::CreateQty(builder, static_cast<uint32_t>(pkt.new_qty));
++    auto fb_new_price =
++        Itch::CreatePrice(builder, static_cast<uint32_t>(pkt.new_price));
++    uint16_t stock_locate = 0;
++    auto replace_order_offset =
++        Itch::CreateReplaceOrder(builder, stock_locate, fb_ts, fb_orig_oid,
++                                 fb_new_oid, fb_new_qty, fb_new_price);
++    auto msg_offset = Itch::CreateMessageContainer(
++        builder, Itch::ItchMessage_ReplaceOrder, replace_order_offset.Union());
++    builder.Finish(msg_offset);
++    if constexpr (kConst::WRITE_TO_FILE) {
++      if constexpr (kConst::OUTPUT_HEX) {
++        print_hex_fmt(output_buffer, builder.GetBufferPointer(),
++                      builder.GetSize());
++      } else {
++        write_raw_bytes(output_buffer, builder.GetBufferPointer(),
++                        builder.GetSize());
++      }
++    }
++  } else if constexpr (kConst::WRITE_TO_FILE) {
++    output_buffer.push_back('\n');
++  }
++}
++
++// --- End Refactored FlatBuffers Serialization ---
++
++void print_usage(const char *prog_name) {
++  fprintf(
++      stderr,
++      "Usage: %s -i <input_file> [-d] [-o <output_file>] [-n <max_packets>]\n",
++      prog_name);
++  fprintf(stderr,
++          "  -i <input_file> : Path to the input ITCH data file (required).\n");
++  fprintf(stderr, "  -d              : Enable dump mode (serialize to "
++                  "FlatBuffers hex output).\n");
++  fprintf(stderr, "  -o <output_file>: Path to the output file for hex dump "
++                  "(required if -d is used).\n");
++  fprintf(stderr, "  -n <max_packets>: Maximum number of packets to process "
++                  "(optional, default: all).\n");
++}
++
++int main(int argc, char *argv[]) {
++  size_t max_packets = std::numeric_limits<size_t>::max();
++  bool dump_mode = false;
++  const char *input_path = nullptr;
++  const char *output_path = nullptr;
++  int opt;
++
++  // Parse command-line arguments using getopt
++  while ((opt = getopt(argc, argv, "i:o:dn:")) != -1) {
++    switch (opt) {
++    case 'i':
++      input_path = optarg;
++      break;
++    case 'o':
++      output_path = optarg;
++      break;
++    case 'd':
++      dump_mode = true;
++      break;
++    case 'n': { // Scope for variable declaration
++      char *endptr = nullptr;
++      errno = 0; // Reset errno before call
++      unsigned long long val = strtoull(optarg, &endptr, 10);
++      if (errno != 0 || *endptr != '\0' || endptr == optarg) {
++        fprintf(stderr, "Error: Invalid number for max_packets (-n): %s\n",
++                optarg);
++        print_usage(argv[0]);
++        return 1;
++      }
++      // Check if value fits in size_t
++      if (val > std::numeric_limits<size_t>::max()) {
++        fprintf(stderr, "Error: max_packets value (-n) too large: %s\n",
++                optarg);
++        print_usage(argv[0]);
++        return 1;
++      }
++      max_packets = static_cast<size_t>(val);
++    } break;
++    case '?': // Unknown option or missing argument
++      fprintf(stderr, "Error: Unknown option or missing argument.\n");
++      print_usage(argv[0]);
++      return 1;
++    default:
++      print_usage(argv[0]);
++      return 1;
++    }
++  }
++
++  // Validate required arguments
++  if (!input_path) {
++    fprintf(stderr, "Error: Input file path (-i) is required.\n");
++    print_usage(argv[0]);
++    return 1;
++  }
++  if (dump_mode && kConst::WRITE_TO_FILE && !output_path) {
++    fprintf(stderr, "Error: Output file path (-o) is required when dump mode "
++                    "(-d) is enabled and kConst::WRITE_TO_FILE is true.\n");
++    print_usage(argv[0]);
++    return 1;
++  }
++
++  // Open input file
++  int input_fd = open(input_path, O_RDONLY);
++  if (input_fd == -1) {
++    perror("Error opening input file");
++    return 1;
++  }
++
++  // Open output file only if dumping and writing
++  int output_fd = -1;
++  if (dump_mode && kConst::WRITE_TO_FILE) {
++    output_fd = open(output_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++    if (output_fd == -1) {
++      perror("Error opening output file");
++      close(input_fd); // Close input file before exiting
++      return 1;
++    }
++    fprintf(stderr, "Dump mode enabled. Input: %s, Output: %s (Format: %s)\n",
++            input_path, output_path,
++            kConst::BUILD_FLATBUFFER
++                ? (kConst::OUTPUT_HEX ? "Hex" : "Raw Bytes")
++                : "Newline Only");
++  } else if (dump_mode) {
++    fprintf(stderr,
++            "Dump mode enabled. Input: %s (Output to file disabled by "
++            "kConst::WRITE_TO_FILE=false)\n",
++            input_path);
++  } else {
++    fprintf(stderr, "Order book mode enabled. Input: %s\n", input_path);
++  }
++
++  buf_t buf(1024);
++  buf.fd = input_fd;
++  // Initialize with default start time in case no packets are processed
++  std::chrono::steady_clock::time_point start =
++      std::chrono::steady_clock::now();
++  size_t npkts = 0;
++
++  // Initialize output buffer only if dumping and writing
++  fmt::memory_buffer output_buffer;
++  const size_t WRITE_THRESHOLD = 131072 * 32;
++  if (dump_mode && kConst::WRITE_TO_FILE) {
++    output_buffer.reserve(WRITE_THRESHOLD);
++  }
++
++  // Conditionally initialize order book structures if not dumping
++  if (!dump_mode) {
++    // order_book::oid_map.max_load_factor(0.5);
++    order_book::oid_map.reserve(
++        order_id_t(184118975 * 2)); // See original comments
++    printf("Order book size: %lu bytes\n",
++           sizeof(order_book) * order_book::MAX_BOOKS);
++  } // Removed the initial print statement for dump mode
++
++  while (is_ok(buf.ensure(3)) && npkts < max_packets) {
++    // Always increment packet count and track timing for both modes
++    if (npkts == 0) {
++      // Reset the start time when we process the first packet
++      start = std::chrono::steady_clock::now();
++    }
++    ++npkts;
++
++    itch_t const msgtype = itch_t(*buf.get(2));
++
++    // Flatbuffer builder instance (reused per message)
++    flatbuffers::FlatBufferBuilder builder(
++        1024); // Initial size, grows as needed
++
++    switch (msgtype) {
++    // --- Cases that just read and discard (no action in either mode yet) ---
++    case itch_t::SYSEVENT: {
++      PROCESS<itch_t::SYSEVENT>::read_from(&buf);
++      break;
++    }
++    case itch_t::STOCK_DIRECTORY: {
++      PROCESS<itch_t::STOCK_DIRECTORY>::read_from(&buf);
++      break;
++    }
++    case itch_t::TRADING_ACTION: {
++      PROCESS<itch_t::TRADING_ACTION>::read_from(&buf);
++      break;
++    }
++    case itch_t::REG_SHO_RESTRICT: {
++      PROCESS<itch_t::REG_SHO_RESTRICT>::read_from(&buf);
++      break;
++    }
++    case itch_t::MPID_POSITION: {
++      PROCESS<itch_t::MPID_POSITION>::read_from(&buf);
++      break;
++    }
++    case itch_t::MWCB_DECLINE: {
++      PROCESS<itch_t::MWCB_DECLINE>::read_from(&buf);
++      break;
++    }
++    case itch_t::MWCB_STATUS: {
++      PROCESS<itch_t::MWCB_STATUS>::read_from(&buf);
++      break;
++    }
++    case itch_t::IPO_QUOTE_UPDATE: {
++      PROCESS<itch_t::IPO_QUOTE_UPDATE>::read_from(&buf);
++      break;
++    }
++    case itch_t::TRADE: {
++      PROCESS<itch_t::TRADE>::read_from(&buf);
++      break;
++    }
++    case itch_t::CROSS_TRADE: {
++      PROCESS<itch_t::CROSS_TRADE>::read_from(&buf);
++      break;
++    }
++    case itch_t::BROKEN_TRADE: {
++      PROCESS<itch_t::BROKEN_TRADE>::read_from(&buf);
++      break;
++    }
++    case itch_t::NET_ORDER_IMBALANCE: {
++      PROCESS<itch_t::NET_ORDER_IMBALANCE>::read_from(&buf);
++      break;
++    }
++    case itch_t::RETAIL_PRICE_IMPROVEMENT: {
++      PROCESS<itch_t::RETAIL_PRICE_IMPROVEMENT>::read_from(&buf);
++      break;
++    }
++    case itch_t::PROCESS_LULD_AUCTION_COLLAR_MESSAGE: {
++      PROCESS<itch_t::PROCESS_LULD_AUCTION_COLLAR_MESSAGE>::read_from(&buf);
++      break;
++    }
++
++    // --- Cases with Order Book Logic OR FlatBuffer Dumping ---
++    case (itch_t::ADD_ORDER): {
++      auto const pkt = PROCESS<itch_t::ADD_ORDER>::read_from(&buf);
++      assert(uint64_t(pkt.oid) <
++             uint64_t(std::numeric_limits<int32_t>::max())); // Keep assertion
++
++      if (dump_mode) {
++        serialize_and_print<itch_t::ADD_ORDER>(output_buffer, builder, pkt);
++      } else {
++        order_book::add_order(order_id_t(pkt.oid), book_id_t(pkt.stock_locate),
++                              mksigned(pkt.price, pkt.buy), pkt.qty);
++      }
++      break;
++    }
++    case (itch_t::ADD_ORDER_MPID): {
++      auto const pkt = PROCESS<itch_t::ADD_ORDER_MPID>::read_from(&buf);
++      if (dump_mode) {
++        serialize_and_print<itch_t::ADD_ORDER_MPID>(output_buffer, builder,
++                                                    pkt);
++      } else {
++        order_book::add_order(
++            order_id_t(pkt.add_msg.oid), book_id_t(pkt.add_msg.stock_locate),
++            mksigned(pkt.add_msg.price, pkt.add_msg.buy), pkt.add_msg.qty);
++      }
++      break;
++    }
++    case (itch_t::EXECUTE_ORDER): {
++      auto const pkt = PROCESS<itch_t::EXECUTE_ORDER>::read_from(&buf);
++      if (dump_mode) {
++        serialize_and_print<itch_t::EXECUTE_ORDER>(output_buffer, builder, pkt);
++      } else {
++        order_book::execute_order(order_id_t(pkt.oid), pkt.qty);
++      }
++      break;
++    }
++    case (itch_t::EXECUTE_ORDER_WITH_PRICE): {
++      auto const pkt =
++          PROCESS<itch_t::EXECUTE_ORDER_WITH_PRICE>::read_from(&buf);
++      if (dump_mode) {
++        serialize_and_print<itch_t::EXECUTE_ORDER_WITH_PRICE>(output_buffer,
++                                                              builder, pkt);
++      } else {
++        order_book::execute_order(order_id_t(pkt.exec.oid), pkt.exec.qty);
++      }
++      break;
++    }
++    case (itch_t::REDUCE_ORDER): {
++      auto const pkt = PROCESS<itch_t::REDUCE_ORDER>::read_from(&buf);
++      if (dump_mode) {
++        serialize_and_print<itch_t::REDUCE_ORDER>(output_buffer, builder, pkt);
++      } else {
++        order_book::cancel_order(order_id_t(pkt.oid),
++                                 pkt.qty); // Note: C++ uses 'cancel'
++      }
++      break;
++    }
++    case (itch_t::DELETE_ORDER): {
++      auto const pkt = PROCESS<itch_t::DELETE_ORDER>::read_from(&buf);
++      if (dump_mode) {
++        serialize_and_print<itch_t::DELETE_ORDER>(output_buffer, builder, pkt);
++      } else {
++        order_book::delete_order(order_id_t(pkt.oid));
++      }
++      break;
++    }
++    case (itch_t::REPLACE_ORDER): {
++      auto const pkt = PROCESS<itch_t::REPLACE_ORDER>::read_from(&buf);
++      if (dump_mode) {
++        serialize_and_print<itch_t::REPLACE_ORDER>(output_buffer, builder, pkt);
++      } else {
++        // Note: mksigned used BUY_SELL::BUY here, potentially incorrect if
++        // replace can be sell?
++        order_book::replace_order(
++            order_id_t(pkt.oid), order_id_t(pkt.new_order_id), pkt.new_qty,
++            mksigned(pkt.new_price, BUY_SELL::BUY)); // Check this logic
++      }
++      break;
++    }
++    default: {
++      // Unknown message type, try to read base length to advance buffer
++      uint16_t const msglen = be16toh(*(uint16_t *)buf.get(0));
++      buf.advance(2); // Advance past length
++      std::cerr << "Warning: Unknown message type encountered: "
++                << char(msgtype) << " attempting to skip " << msglen
++                << " bytes." << std::endl;
++      if (is_ok(buf.ensure(msglen))) {
++        buf.advance(msglen);
++      } else {
++        std::cerr << "Error: Failed to skip unknown message, stopping."
++                  << std::endl;
++        goto end_loop; // Exit loop if we can't safely skip
++      }
++      // Old logic:
++      // printf("Uh oh bad code %d\n", char(msgtype));
++      // assert(false);
++      break;
++    }
++    }
++    builder.Clear(); // Clear builder for next message
++
++    // Check if output buffer needs flushing (only if dumping and writing)
++    if (dump_mode && kConst::WRITE_TO_FILE &&
++        output_buffer.size() >= WRITE_THRESHOLD) {
++      ssize_t written =
++          write(output_fd, output_buffer.data(), output_buffer.size());
++      if (written != (ssize_t)output_buffer.size()) {
++        perror("Error writing buffered data to output file");
++        // Consider breaking loop or handling error more robustly
++        goto end_loop; // Example: jump to cleanup on error
++      }
++      output_buffer.clear(); // Clear buffer after writing
++    }
++  }
++
++end_loop: // Label to jump to for graceful exit on error
++
++  // Write any remaining data in the output buffer
++  if (dump_mode && kConst::WRITE_TO_FILE && output_buffer.size() > 0) {
++    ssize_t written =
++        write(output_fd, output_buffer.data(), output_buffer.size());
++    if (written != (ssize_t)output_buffer.size()) {
++      perror("Error writing remaining buffered data to output file");
++    }
++  }
++
++  // Cleanup: Close files
++  if (input_fd != -1) {
++    close(input_fd);
++  }
++  if (output_fd != -1) {
++    close(output_fd);
++  }
++
++  // Only print performance stats if not dumping or if packets were processed
++  if (!dump_mode || npkts > 0) {
++    std::chrono::steady_clock::time_point end =
++        std::chrono::steady_clock::now();
++    size_t nanos = 0;
++    if (npkts > 0) { // Avoid division by zero if start time wasn't set
++      nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start)
++                  .count();
++    }
++    // Print performance stats to stderr to avoid polluting potential output
++    // file
++    fprintf(stderr,
++            "%lu packets processed in %lu nanos. Average: %.2f nanos/packet.\n",
++            npkts, nanos,
++            (npkts > 0) ? (nanos / static_cast<double>(npkts)) : 0.0);
++  }
++
++  return 0; // Indicate success
++}
+diff --git a/itch-order-book/src/order_book.h b/itch-order-book/src/order_book.h
+new file mode 100644
+index 0000000..294a577
+--- /dev/null
++++ b/itch-order-book/src/order_book.h
+@@ -0,0 +1,783 @@
++#pragma once
++#include "../external/flat_hash_map/bytell_hash_map.hpp" // ska::bytell_hash_map
++#include "../external/parallel-hashmap/parallel_hashmap/btree.h" // phmap::btree_map
++#include "../external/parallel-hashmap/parallel_hashmap/phmap.h" // phmap::flat_hash_map
++#include "itch.h"
++#include <absl/container/flat_hash_map.h>
++#include <algorithm> // for std::lower_bound, std::remove_if
++#include <cassert>
++#include <cstddef>
++#include <cstdint>
++#include <stdexcept>
++#include <vector>
++
++/* This is an optimized order book implementation.
++ * Conceptually an order book is two sets of levels, with each
++ * level representing all the queued orders at a price.
++ *
++ * This implementation provides O(1) lookup of the best bid and offer
++ * as well as the aggregated quantity for any price. It provides
++ * very fast throughput (61.5ns / tick at last benchmark), although
++ * note that there are some poor performance worst-case ticks.
++ *
++ * The ITCH feed sends some metadata about each order with each add_order
++ * message, such as the price, quantity and symbol (really a number
++ * referring to the symbol). The user is expected after that to keep
++ * track of the metadata; for instance the delete message only has
++ * the order id and the user is expected to know which symbol
++ * that refers to as well as the price and size.
++ *
++ * This implementation uses several tricks. The first is that, while
++ * a hashmap seems like a reasonable data structure to keep track of
++ * the metadata for each order, in practice the ITCH feed generates
++ * the order ids close together, not going past a max id of several
++ * hundred million. We thus store the metadata for each order in an
++ * array, so looking up the order metadata is a single dereference.
++ * The order id generation has a side benefit that new orders are
++ * likely to be near recently added orders, so the pages are likely
++ * to be in the TLB and memory cache.
++ *
++ * Each order knows which book and price level it belongs to. So
++ * to find all the data about an order requires two to three
++ * dereferences. Also the quantities in each price level are held
++ * in a pointed to data structure so that a reduce operation does
++ * not need to search the levels but can modify the quantity at the
++ * level directly from the pointer stored in the order metadata.
++ *
++ * Another trick is that each price level is represented as a price
++ * and quantity, and the levels are stored in a sorted array instead
++ * of a tree. Averagely speaking most activity is near the top of
++ * the book, so the implementation only needs to go 1-5 levels deep
++ * into the book. Thus using an array is fast since it improves
++ * locality and uses less memory. Note though that the worst case
++ * performance could be bad - if somebody adds and deletes orders
++ * far away from the inside of the book it could result in longer
++ * processing for those messages.
++ *
++ * Lastly, since the orders and levels are stored in their own global
++ * pools, they are likely to be local and there is very little pressure
++ * on the allocator. In fact the only allocations are bulk allocations
++ * from stl container resizing.
++ */
++
++#define MKPRIMITIVE(__x) ((std::underlying_type<decltype(__x)>::type)__x)
++
++constexpr bool is_power_of_two(uint64_t n) { // stolen from linux header
++  return (n != 0 && ((n & (n - 1)) == 0));
++}
++
++enum class sprice_t : int32_t {};
++bool constexpr is_bid(sprice_t const x) { return int32_t(x) >= 0; }
++#define MEMORY_DEFS                                                            \
++  using __ptr = ptr_t;                                                         \
++  using size_t__ = typename std::underlying_type<ptr_t>::type;
++
++/* A custom, pooling allocator. It uses a non-shrinking vector as its pool,
++ * and a vector (LIFO stack) as its free list.
++ * If there are no free locations, increment m_size, representing growing
++ * the pool. If there is a free location, pop its address off the free list
++ * and return that. To free an object, push its address onto the free list.
++ * Note that pointers are not guaranteed to be stable across invocations
++ * of `allocate`. To have a stable way of referencing an object use
++ * `get` on its address.
++ *
++ * Performance: Since the pool and the free list are both represented
++ * as arrays, an allocate is an increment if the free list is empty,
++ * or a decrement and dereference (to the tail of the pool which is
++ * likely in cache), if the free list is not empty.
++ * A deallocate is a decrement and a write to memory.
++ *
++ * The implementation uses custom pointer types to save space, and
++ * to preserve addresses if the underlying container is resized.
++ * For instance we define `enum class order_id_t : uint32_t {}`
++ * instead of (order *)
++ */
++template <class T, typename ptr_t, size_t SIZE_HINT> class pool {
++public:
++  MEMORY_DEFS;
++  std::vector<T> m_allocated;
++  std::vector<ptr_t> m_free;
++  pool() { m_allocated.reserve(SIZE_HINT); }
++  pool(size_t reserve_size) { m_allocated.reserve(reserve_size); }
++  T *get(ptr_t idx) { return &m_allocated[size_t__(idx)]; }
++  T &operator[](ptr_t idx) { return m_allocated[size_t__(idx)]; }
++#define ALLOC_INVARIANT                                                        \
++  (m_free_size >= 0) /* aka can't free more than has been allocated */
++  __ptr alloc(void) {
++    if (m_free.empty()) {
++      auto ret = __ptr(m_allocated.size());
++      m_allocated.push_back(T());
++      return ret;
++    } else {
++      auto ret = __ptr(m_free.back());
++      m_free.pop_back();
++      return ret;
++    }
++  }
++  void free(__ptr idx) { m_free.push_back(idx); }
++#undef ALLOC_INVARIANT
++};
++
++enum class book_id_t : uint16_t {};
++enum class level_id_t : uint32_t {};
++enum class order_id_t : uint32_t {};
++
++// Define map implementation types
++enum class OrderStoreImplementation {
++  VECTOR = 0,
++  ABSEIL_MAP = 1,
++  SKA_MAP = 2,
++  PHMAP_MAP = 3
++};
++
++// Enum to select level container implementation
++enum class LevelContainerType { BTREE_MAP, SORTED_VECTOR };
++
++// Configuration struct - replace #define with constexpr
++struct kOrderBookConfig {
++  // Select OID map implementation
++  static constexpr OrderStoreImplementation oidMapImpl =
++      OrderStoreImplementation::PHMAP_MAP;
++
++  // Select Level container implementation (BTREE_MAP or SORTED_VECTOR)
++  static constexpr LevelContainerType levelContainerImpl =
++      LevelContainerType::SORTED_VECTOR; // Default to vector for now
++
++  static constexpr bool TRACK_ORDERS_IN_LEVEL = true;
++
++  // Initial capacity of order vectors to reduce allocations
++  static constexpr size_t LEVEL_ORDERS_INITIAL_CAPACITY = 8;
++};
++
++// Hash function for order_id_t - enables use with std/absl hash maps
++template <> struct std::hash<order_id_t> {
++  std::size_t operator()(const order_id_t &id) const {
++    return std::hash<uint32_t>{}(static_cast<uint32_t>(id));
++  }
++};
++
++/* A datatype representing an order. Since this order book only wants
++ * to know the size at each level it just remembers its quantity. If
++ * one wanted to maintain knowledge about the queue it would probably
++ * be fast to maintain a doubly linked list.
++ * It also remember which book it belongs to and its price level. This
++ * is so that given just an oid we can look up the book structure
++ * as well as just the price level if we want to modify the quantity
++ * at the level without searching for it in the book.
++ */
++typedef struct order {
++  qty_t m_qty;
++  level_id_t level_idx;
++  book_id_t book_idx;
++} order_t;
++
++// Per-level order entry to store order information
++// at each price level for iteration
++// Only defined when tracking orders is enabled
++struct level_order_entry {
++  qty_t qty;
++  timestamp_t timestamp; // Optional: useful for FIFO matching
++  order_id_t oid;        // Added to store order ID with the entry
++  bool deleted;          // Flag for lazy deletion
++};
++using level_order_entry_t = level_order_entry;
++
++class level {
++public:
++  sprice_t m_price;
++  qty_t m_qty;
++
++  // Store orders in this level with a vector for better cache locality
++  // Only populated when tracking orders is enabled
++  std::vector<level_order_entry_t> m_orders;
++
++  // Count of logically deleted entries for cleanup tracking
++  size_t m_deleted_count;
++
++  // Threshold ratio for triggering cleanup (deleted/total)
++  static constexpr float CLEANUP_THRESHOLD = 0.25f;
++
++  level(sprice_t __price, qty_t __qty)
++      : m_price(__price), m_qty(__qty), m_deleted_count(0) {
++    // Pre-allocate vector capacity to reduce allocations
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      m_orders.reserve(kOrderBookConfig::LEVEL_ORDERS_INITIAL_CAPACITY);
++    }
++  }
++
++  level() : m_deleted_count(0) {
++    // Pre-allocate vector capacity to reduce allocations
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      m_orders.reserve(kOrderBookConfig::LEVEL_ORDERS_INITIAL_CAPACITY);
++    }
++  }
++
++  // Add an order to this level
++  void add_order(order_id_t oid, qty_t qty,
++                 timestamp_t timestamp = timestamp_t(0)) {
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      // Check if we need cleanup before adding a new order
++      maybe_cleanup();
++      level_order_entry_t entry{qty, timestamp, oid, false};
++      m_orders.push_back(entry);
++    }
++  }
++
++  // Reduce an order's quantity in this level
++  void reduce_order(order_id_t oid, qty_t qty) {
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      for (auto &entry : m_orders) {
++        if (!entry.deleted && entry.oid == oid) {
++          auto tmp = MKPRIMITIVE(entry.qty);
++          tmp -= MKPRIMITIVE(qty);
++          if (tmp > 0) {
++            // Partial reduction
++            entry.qty = qty_t(tmp);
++          } else {
++            // Complete reduction, mark as deleted
++            entry.deleted = true;
++            m_deleted_count++;
++          }
++          break;
++        }
++      }
++
++      // Check if we need cleanup after reducing
++      maybe_cleanup();
++    }
++  }
++
++  // Remove an order from this level - uses lazy deletion
++  void delete_order(order_id_t oid) {
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      for (auto &entry : m_orders) {
++        if (!entry.deleted && entry.oid == oid) {
++          entry.deleted = true;
++          m_deleted_count++;
++          break;
++        }
++      }
++
++      // Check if we need cleanup after deleting
++      maybe_cleanup();
++    }
++  }
++
++  // Check if cleanup should be performed and do it if needed
++  void maybe_cleanup() {
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      if (m_deleted_count > 0 &&
++          (float)m_deleted_count / m_orders.size() >= CLEANUP_THRESHOLD) {
++        cleanup();
++      }
++    }
++  }
++
++  // Perform actual removal of deleted orders
++  void cleanup() {
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      if (m_deleted_count == 0)
++        return;
++
++      // Use erase-remove idiom to remove deleted entries
++      m_orders.erase(std::remove_if(m_orders.begin(), m_orders.end(),
++                                    [](const level_order_entry_t &entry) {
++                                      return entry.deleted;
++                                    }),
++                     m_orders.end());
++
++      // Reset deleted count
++      m_deleted_count = 0;
++    }
++  }
++
++  // Helper to get number of orders at this level (non-deleted)
++  size_t order_count() const {
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      return m_orders.size() - m_deleted_count;
++    } else {
++      return (m_qty > qty_t(0)) ? 1 : 0;
++    }
++  }
++};
++
++// Comparator for sprice_t in btree_map
++struct sprice_comparator {
++  bool operator()(const sprice_t &lhs, const sprice_t &rhs) const {
++    // Bids are stored in descending order (highest first)
++    // Offers are stored in ascending order (lowest first)
++    // Since we'll have separate maps for bids and offers, we can
++    // use a single comparator for both with is_bid() check
++    if (is_bid(lhs) && is_bid(rhs)) {
++      // For bids, higher is better (descending order)
++      return int32_t(lhs) > int32_t(rhs);
++    } else {
++      // For offers, lower is better (ascending order)
++      return int32_t(lhs) < int32_t(rhs);
++    }
++  }
++};
++
++// CRTP Base class for all oidmap implementations
++template <class T, class Derived> class oidmap_base {
++public:
++  void reserve(order_id_t const oid) {
++    static_cast<Derived *>(this)->reserve_impl(oid);
++  }
++
++  T &operator[](order_id_t const oid) {
++    return static_cast<Derived *>(this)->operator_square_impl(oid);
++  }
++
++  T *get(order_id_t const oid) {
++    return static_cast<Derived *>(this)->get_impl(oid);
++  }
++};
++
++// Vector-based implementation using CRTP
++template <class T>
++class oidmap_vector_impl : public oidmap_base<T, oidmap_vector_impl<T>> {
++public:
++  std::vector<T> m_data;
++
++  void reserve_impl(order_id_t const oid) {
++    size_t const idx = size_t(oid);
++    if (idx >= m_data.size()) {
++      m_data.resize(idx + 1);
++    }
++  }
++
++  T &operator_square_impl(order_id_t const oid) {
++    size_t const idx = size_t(oid);
++    return m_data[idx];
++  }
++
++  T *get_impl(order_id_t const oid) {
++    size_t const idx = size_t(oid);
++    return &m_data[idx];
++  }
++};
++
++// absl::flat_hash_map implementation using CRTP
++template <class T>
++class oidmap_abseil_impl : public oidmap_base<T, oidmap_abseil_impl<T>> {
++public:
++  absl::flat_hash_map<order_id_t, T> m_data;
++
++  void reserve_impl(order_id_t const oid) {
++    // No need to pre-allocate specific indices
++    (void)oid;
++  }
++
++  T &operator_square_impl(order_id_t const oid) { return m_data[oid]; }
++
++  T *get_impl(order_id_t const oid) { return &m_data[oid]; }
++};
++
++// ska::bytell_hash_map implementation using CRTP
++template <class T>
++class oidmap_ska_impl : public oidmap_base<T, oidmap_ska_impl<T>> {
++public:
++  ska::bytell_hash_map<order_id_t, T> m_data;
++
++  void reserve_impl(order_id_t const oid) {
++    (void)oid;
++    // No need to pre-allocate specific indices
++  }
++
++  T &operator_square_impl(order_id_t const oid) { return m_data[oid]; }
++
++  T *get_impl(order_id_t const oid) { return &m_data[oid]; }
++};
++
++// phmap::flat_hash_map implementation using CRTP
++template <class T>
++class oidmap_phmap_impl : public oidmap_base<T, oidmap_phmap_impl<T>> {
++public:
++  phmap::flat_hash_map<order_id_t, T> m_data;
++
++  void reserve_impl(order_id_t const oid) {
++    (void)oid;
++    // No need to pre-allocate specific indices
++  }
++
++  T &operator_square_impl(order_id_t const oid) { return m_data[oid]; }
++
++  T *get_impl(order_id_t const oid) { return &m_data[oid]; }
++};
++
++// Type alias to select appropriate implementation based on config
++template <class T>
++using oidmap = std::conditional_t<
++    kOrderBookConfig::oidMapImpl == OrderStoreImplementation::VECTOR,
++    oidmap_vector_impl<T>,
++    std::conditional_t<
++        kOrderBookConfig::oidMapImpl == OrderStoreImplementation::ABSEIL_MAP,
++        oidmap_abseil_impl<T>,
++        std::conditional_t<kOrderBookConfig::oidMapImpl ==
++                               OrderStoreImplementation::SKA_MAP,
++                           oidmap_ska_impl<T>, oidmap_phmap_impl<T>>>>;
++
++qty_t operator+(qty_t const a, qty_t const b) {
++  return qty_t(MKPRIMITIVE(a) + MKPRIMITIVE(b));
++}
++
++// Define container traits and helper methods for different implementations
++// to avoid invalid method calls in if constexpr branches
++template <LevelContainerType T> struct level_container_traits {};
++
++// Specialization for BTREE_MAP container type
++template <> struct level_container_traits<LevelContainerType::BTREE_MAP> {
++  using bid_levels_t =
++      phmap::btree_map<sprice_t, level_id_t, sprice_comparator>;
++  using offer_levels_t = phmap::btree_map<sprice_t, level_id_t>;
++
++  // Find level in a btree map
++  static bool find_bid_level(const bid_levels_t &levels, sprice_t price,
++                             level_id_t &level_idx) {
++    auto it = levels.find(price);
++    if (it != levels.end()) {
++      level_idx = it->second;
++      return true;
++    }
++    return false;
++  }
++
++  static bool find_offer_level(const offer_levels_t &levels, sprice_t price,
++                               level_id_t &level_idx) {
++    auto it = levels.find(price);
++    if (it != levels.end()) {
++      level_idx = it->second;
++      return true;
++    }
++    return false;
++  }
++
++  // Add a new level to a btree map
++  static void add_bid_level(bid_levels_t &levels, sprice_t price,
++                            level_id_t level_idx) {
++    levels.emplace(price, level_idx);
++  }
++
++  static void add_offer_level(offer_levels_t &levels, sprice_t price,
++                              level_id_t level_idx) {
++    levels.emplace(price, level_idx);
++  }
++
++  // Remove a level from a btree map
++  static void remove_bid_level(bid_levels_t &levels, sprice_t price) {
++    levels.erase(price);
++  }
++
++  static void remove_offer_level(offer_levels_t &levels, sprice_t price) {
++    levels.erase(price);
++  }
++};
++
++// Specialization for SORTED_VECTOR container type
++template <> struct level_container_traits<LevelContainerType::SORTED_VECTOR> {
++  using level_entry_t = std::pair<sprice_t, level_id_t>;
++  using bid_levels_t = std::vector<level_entry_t>;
++  using offer_levels_t = std::vector<level_entry_t>;
++
++  // Find level using binary search in a sorted vector
++  static bool find_bid_level(const bid_levels_t &levels, sprice_t price,
++                             level_id_t &level_idx) {
++    auto it = std::lower_bound(levels.begin(), levels.end(), price,
++                               [](const level_entry_t &entry, sprice_t p) {
++                                 return int32_t(entry.first) >
++                                        int32_t(p); // Descending order for bids
++                               });
++
++    if (it != levels.end() && it->first == price) {
++      level_idx = it->second;
++      return true;
++    }
++    return false;
++  }
++
++  static bool find_offer_level(const offer_levels_t &levels, sprice_t price,
++                               level_id_t &level_idx) {
++    auto it =
++        std::lower_bound(levels.begin(), levels.end(), price,
++                         [](const level_entry_t &entry, sprice_t p) {
++                           return int32_t(entry.first) <
++                                  int32_t(p); // Ascending order for offers
++                         });
++
++    if (it != levels.end() && it->first == price) {
++      level_idx = it->second;
++      return true;
++    }
++    return false;
++  }
++
++  // Add a new level to a sorted vector
++  static void add_bid_level(bid_levels_t &levels, sprice_t price,
++                            level_id_t level_idx) {
++    auto it = std::lower_bound(levels.begin(), levels.end(), price,
++                               [](const level_entry_t &entry, sprice_t p) {
++                                 return int32_t(entry.first) >
++                                        int32_t(p); // Descending
++                               });
++
++    levels.insert(it, std::make_pair(price, level_idx));
++  }
++
++  static void add_offer_level(offer_levels_t &levels, sprice_t price,
++                              level_id_t level_idx) {
++    auto it = std::lower_bound(levels.begin(), levels.end(), price,
++                               [](const level_entry_t &entry, sprice_t p) {
++                                 return int32_t(entry.first) <
++                                        int32_t(p); // Ascending
++                               });
++
++    levels.insert(it, std::make_pair(price, level_idx));
++  }
++
++  // Remove a level from a sorted vector
++  static void remove_bid_level(bid_levels_t &levels, sprice_t price) {
++    auto it = std::lower_bound(levels.begin(), levels.end(), price,
++                               [](const level_entry_t &entry, sprice_t p) {
++                                 return int32_t(entry.first) >
++                                        int32_t(p); // Descending
++                               });
++
++    if (it != levels.end() && it->first == price) {
++      levels.erase(it);
++    }
++  }
++
++  static void remove_offer_level(offer_levels_t &levels, sprice_t price) {
++    auto it = std::lower_bound(levels.begin(), levels.end(), price,
++                               [](const level_entry_t &entry, sprice_t p) {
++                                 return int32_t(entry.first) <
++                                        int32_t(p); // Ascending
++                               });
++
++    if (it != levels.end() && it->first == price) {
++      levels.erase(it);
++    }
++  }
++};
++
++// Simplify accessing the correct trait for the configured container type
++using level_traits =
++    level_container_traits<kOrderBookConfig::levelContainerImpl>;
++
++class order_book {
++public:
++  static constexpr size_t MAX_BOOKS = 1 << 14;
++  static constexpr size_t NUM_LEVELS = 1 << 20;
++  static order_book *s_books; // can we allocate this on the stack?
++  static oidmap<order_t> oid_map;
++  using level_vector = pool<level, level_id_t, NUM_LEVELS>;
++
++  // Define map and vector types
++  using bid_btree_t = phmap::btree_map<sprice_t, level_id_t, sprice_comparator>;
++  using offer_btree_t = phmap::btree_map<sprice_t, level_id_t>;
++  using level_entry_t =
++      std::pair<sprice_t, level_id_t>; // Pair price with level ID
++  using bid_vector_t = std::vector<level_entry_t>;
++  using offer_vector_t = std::vector<level_entry_t>;
++
++  // Select types based on config
++  using bid_levels_t =
++      std::conditional_t<kOrderBookConfig::levelContainerImpl ==
++                             LevelContainerType::BTREE_MAP,
++                         bid_btree_t, bid_vector_t>;
++  using offer_levels_t =
++      std::conditional_t<kOrderBookConfig::levelContainerImpl ==
++                             LevelContainerType::BTREE_MAP,
++                         offer_btree_t, offer_vector_t>;
++
++  // A global allocator for all the price levels allocated by all the books.
++  static level_vector s_levels;
++
++  // Store bids and offers in the configured container type
++  bid_levels_t
++      m_bids; // Sorted descending by price (vector) or highest first (map)
++  offer_levels_t
++      m_offers; // Sorted ascending by price (vector) or lowest first (map)
++
++  using level_ptr_t = level_vector::__ptr;
++
++  static void add_order(order_id_t const oid, book_id_t const book_idx,
++                        sprice_t const price, qty_t const qty) {
++    oid_map.reserve(oid);
++    order *order = oid_map.get(oid);
++    order->m_qty = qty;
++    order->book_idx = book_idx;
++
++    s_books[size_t(book_idx)].ADD_ORDER(order, price, qty, oid);
++  }
++
++  void ADD_ORDER(order_t *order, sprice_t const price, qty_t const qty,
++                 order_id_t oid) {
++    level_id_t existing_level_idx;
++    bool found_level = false;
++
++    // Check if level already exists
++    if (is_bid(price)) {
++      found_level =
++          level_traits::find_bid_level(m_bids, price, existing_level_idx);
++    } else {
++      found_level =
++          level_traits::find_offer_level(m_offers, price, existing_level_idx);
++    }
++
++    // Existing level, update it
++    if (found_level) {
++      order->level_idx = existing_level_idx;
++    } else {
++      // Create new level
++      order->level_idx = s_levels.alloc();
++      s_levels[order->level_idx].m_qty = qty_t(0);
++      s_levels[order->level_idx].m_price = price;
++
++      // Add to appropriate container
++      if (is_bid(price)) {
++        level_traits::add_bid_level(m_bids, price, order->level_idx);
++      } else {
++        level_traits::add_offer_level(m_offers, price, order->level_idx);
++      }
++    }
++
++    // Update quantity at the level
++    s_levels[order->level_idx].m_qty = s_levels[order->level_idx].m_qty + qty;
++
++    // Add order to level if tracking orders
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      s_levels[order->level_idx].add_order(oid, qty);
++    }
++  }
++
++  static void delete_order(order_id_t const oid) {
++    order_t *order = oid_map.get(oid);
++    s_books[size_t(order->book_idx)].DELETE_ORDER(order, oid);
++  }
++  static void cancel_order(order_id_t const oid, qty_t const qty) {
++    order_t *order = oid_map.get(oid);
++    s_books[size_t(order->book_idx)].REDUCE_ORDER(order, qty, oid);
++  }
++  // shared between cancel(aka partial cancel aka reduce) and execute
++  void REDUCE_ORDER(order_t *order, qty_t const qty, order_id_t oid) {
++    auto tmp = MKPRIMITIVE(s_levels[order->level_idx].m_qty);
++    tmp -= MKPRIMITIVE(qty);
++    s_levels[order->level_idx].m_qty = qty_t(tmp);
++
++    tmp = MKPRIMITIVE(order->m_qty);
++    tmp -= MKPRIMITIVE(qty);
++    order->m_qty = qty_t(tmp);
++
++    // Update the order in the level's order map
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      s_levels[order->level_idx].reduce_order(oid, qty);
++    }
++  }
++  // shared between delete and execute
++  void DELETE_ORDER(order_t *order, order_id_t oid) {
++    assert(MKPRIMITIVE(s_levels[order->level_idx].m_qty) >=
++           MKPRIMITIVE(order->m_qty));
++    auto tmp = MKPRIMITIVE(s_levels[order->level_idx].m_qty);
++    tmp -= MKPRIMITIVE(order->m_qty);
++    level_id_t level_idx_to_free = order->level_idx;
++    s_levels[level_idx_to_free].m_qty = qty_t(tmp);
++
++    // Remove order from tracking if enabled
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      s_levels[level_idx_to_free].delete_order(oid);
++    }
++
++    // If level is now empty, remove it
++    if (qty_t(0) == s_levels[level_idx_to_free].m_qty) {
++      sprice_t price = s_levels[level_idx_to_free].m_price;
++
++      // Remove level from appropriate container
++      if (is_bid(price)) {
++        level_traits::remove_bid_level(m_bids, price);
++      } else {
++        level_traits::remove_offer_level(m_offers, price);
++      }
++
++      // Free the level
++      s_levels.free(level_idx_to_free);
++    }
++  }
++
++  static void execute_order(order_id_t const oid, qty_t const qty) {
++    order_t *order = oid_map.get(oid);
++    order_book *book = &s_books[MKPRIMITIVE(order->book_idx)];
++
++    if (qty == order->m_qty) {
++      book->DELETE_ORDER(order, oid);
++    } else {
++      book->REDUCE_ORDER(order, qty, oid);
++    }
++  }
++  static void replace_order(order_id_t const old_oid, order_id_t const new_oid,
++                            qty_t const new_qty, sprice_t new_price) {
++    order_t *order = oid_map.get(old_oid);
++    order_book *book = &s_books[MKPRIMITIVE(order->book_idx)];
++    bool const bid = is_bid(book->s_levels[order->level_idx].m_price);
++    book->DELETE_ORDER(order, old_oid);
++    if (!bid) {
++      new_price = sprice_t(-1 * MKPRIMITIVE(new_price));
++    }
++    book->add_order(new_oid, order->book_idx, new_price, new_qty);
++  }
++
++  // Helper method to get number of orders at a specific price
++  size_t orders_at_price(sprice_t price) const {
++    level_id_t level_idx;
++    bool found = false;
++
++    // Find the level
++    if (is_bid(price)) {
++      found = level_traits::find_bid_level(m_bids, price, level_idx);
++    } else {
++      found = level_traits::find_offer_level(m_offers, price, level_idx);
++    }
++
++    // Return count based on mode and if found
++    if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++      return found ? s_levels[level_idx].order_count() : 0;
++    } else {
++      return found ? 1 : 0; // Just check if level exists
++    }
++  }
++
++  // Helper to iterate through orders at a specific price level
++  template <typename Func>
++  void for_each_order_at_price(sprice_t price, Func func) const {
++    level_id_t level_idx;
++    bool found = false;
++
++    // Find the level
++    if (is_bid(price)) {
++      found = level_traits::find_bid_level(m_bids, price, level_idx);
++    } else {
++      found = level_traits::find_offer_level(m_offers, price, level_idx);
++    }
++
++    // Iterate through orders if level found
++    if (found) {
++      const level &lvl = s_levels[level_idx];
++      if constexpr (kOrderBookConfig::TRACK_ORDERS_IN_LEVEL) {
++        // L3 mode: Iterate through individual orders
++        for (const auto &entry : lvl.m_orders) {
++          if (!entry.deleted) {
++            func(entry.oid, entry.qty, entry.timestamp);
++          }
++        }
++      } else {
++        // L2 mode: Call once with aggregate qty
++        func(order_id_t(0), lvl.m_qty, timestamp_t(0));
++      }
++    }
++  }
++};
++
++oidmap<order_t> order_book::oid_map = oidmap<order_t>();
++order_book *order_book::s_books = new order_book[order_book::MAX_BOOKS];
++order_book::level_vector order_book::s_levels = level_vector();
+\ No newline at end of file
+diff --git a/itch-order-book/src/types.h b/itch-order-book/src/types.h
+new file mode 100644
+index 0000000..a82f009
+--- /dev/null
++++ b/itch-order-book/src/types.h
+@@ -0,0 +1,3 @@
++#pragma once
++#include <stdint.h>
++typedef int fd_t;

@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# Test Claude Code through our proxy
+export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_AUTH_TOKEN=$OPENAI_API_KEY
+export ANTHROPIC_CUSTOM_HEADERS="x-api-key: $ANTHROPIC_AUTH_TOKEN"
+export ANTHROPIC_MODEL='claude-3-7-sonnet-20250219'
+export ANTHROPIC_SMALL_FAST_MODEL='claude-3-5-haiku-20241022'
+
+echo "Testing Claude Code through proxy..."
+bunx @anthropic-ai/claude-code --verbose -p "What is polymorphism in C++?" 
