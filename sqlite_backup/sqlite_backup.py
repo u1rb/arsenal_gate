@@ -96,15 +96,15 @@ def backup_trading_status_paths(source_db_path, backup_db_path, source_table, co
             continue
 
         try:
-            with open(path, 'rb') as infile, tempfile.NamedTemporaryFile(delete=True) as tmpfile:
-                # Create a write buffer to the temporary file
-                with compressor.stream_writer(tmpfile) as compressor_writer:
+            with open(path, 'rb') as infile, tempfile.NamedTemporaryFile(mode='wb+', delete=True) as tmpfile:
+                # Create a write buffer to the temporary file without closing it after compression
+                with compressor.stream_writer(tmpfile, close_handle=False) as compressor_writer:
                     while True:
                         chunk = infile.read(65536)  # Read in 64KB chunks
                         if not chunk:
                             break
                         compressor_writer.write(chunk)
-                # After compression, read the compressed data from the temp file
+                # At this point, the stream_writer has been closed, but tmpfile remains open
                 tmpfile.flush()
                 tmpfile.seek(0)
                 compressed_data = tmpfile.read()
@@ -139,10 +139,10 @@ def backup_trading_status_paths(source_db_path, backup_db_path, source_table, co
 
 if __name__ == "__main__":
     # Example usage:
-    # python backup_script_compressed.py job_index.sqlite backup_compressed.sqlite jobs
+    # python backup_script_compressed_fixed.py job_index.sqlite backup_compressed.sqlite jobs
 
     if len(sys.argv) not in [4, 5]:
-        print("Usage: python backup_script_compressed.py <source_db> <backup_db> <source_table> [<compression_level>]")
+        print("Usage: python backup_script_compressed_fixed.py <source_db> <backup_db> <source_table> [<compression_level>]")
         print("  <compression_level> is optional (1-22). Default is 3.")
         sys.exit(1)
 
