@@ -1,15 +1,17 @@
-From 1145838970b30fd1063d8c7f586039057d606715 Mon Sep 17 00:00:00 2001
+From 3f0266879d710099669247d8f4e758a0ece39b0d Mon Sep 17 00:00:00 2001
 From: Patch Creator <patch@example.com>
-Date: Thu, 23 Jan 2025 15:16:34 +0800
+Date: Thu, 23 Jan 2025 15:31:22 +0800
 Subject: [PATCH] Patch commit
 
 ---
- Cargo.toml    |   8 ++++
- make_patch.sh | 105 +++++++++++++++++++++++++++++++++++++++++++++
- src/main.rs   | 116 ++++++++++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 229 insertions(+)
+ Cargo.toml     |   8 ++++
+ patch_apply.sh |  57 ++++++++++++++++++++++++
+ patch_make.sh  | 105 ++++++++++++++++++++++++++++++++++++++++++++
+ src/main.rs    | 116 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 286 insertions(+)
  create mode 100644 Cargo.toml
- create mode 100644 make_patch.sh
+ create mode 100644 patch_apply.sh
+ create mode 100644 patch_make.sh
  create mode 100644 src/main.rs
 
 diff --git a/Cargo.toml b/Cargo.toml
@@ -26,11 +28,75 @@ index 0000000..c86b175
 +[dependencies]
 +clap = { version = "4.4.18", features = ["derive"] }
 +rand = "0.8.5"
-diff --git a/make_patch.sh b/make_patch.sh
+diff --git a/patch_apply.sh b/patch_apply.sh
+new file mode 100644
+index 0000000..af472c7
+--- /dev/null
++++ b/patch_apply.sh
+@@ -0,0 +1,57 @@
++#!/bin/bash
++set -e
++
++show_help(){
++    echo "Usage: $0 <patch-file> <dst-dir>"
++    echo "Apply a patch file to a destination directory"
++    echo
++    echo "Options:"
++    echo "  -h, --help               Show this help message"
++    echo
++    echo "Examples:"
++    echo "  # Apply patch to current directory"
++    echo "  $0 ../output.patch ."
++}
++
++# Parse command-line arguments
++args=()
++while [[ $# -gt 0 ]]; do
++    case $1 in
++        -h|--help)
++            show_help
++            exit 0
++            ;;
++        *)
++            args+=("$1")
++            shift
++            ;;
++    esac
++done
++
++# Validate arguments
++if [[ ${#args[@]} -ne 2 ]]; then
++    echo "Error: Both patch file and destination directory are required" >&2
++    show_help
++    exit 1
++fi
++
++# Create temporary workspace
++temp_dir=$(mktemp -d)
++
++patch_file=$(realpath "${args[0]}")
++dst_dir=$(realpath "${args[1]}")
++
++# Apply patch
++(
++    cd "$temp_dir"
++    echo -e "Applying patch \n    from $patch_file \n    to $dst_dir"
++    git init --quiet
++    git am --quiet "$patch_file"
++    rm -rf .git  # Auto-delete repo after applying
++    mv ./* "$dst_dir" 2>/dev/null || true  # Handle empty case
++    mv ./.??* "$dst_dir" 2>/dev/null || true  # Move hidden files
++)
++
++# Cleanup
++rm -rf "$temp_dir"
++echo -e "Cleaned up temporary workspace \n    $temp_dir"
+\ No newline at end of file
+diff --git a/patch_make.sh b/patch_make.sh
 new file mode 100644
 index 0000000..56276f7
 --- /dev/null
-+++ b/make_patch.sh
++++ b/patch_make.sh
 @@ -0,0 +1,105 @@
 +#!/bin/bash
 +set -e
