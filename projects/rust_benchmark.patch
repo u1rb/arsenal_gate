@@ -1,0 +1,272 @@
+From c9250ea1247772e8cd754a98d379593fbcf6a522 Mon Sep 17 00:00:00 2001
+From: Patch Creator <patch@example.com>
+Date: Thu, 23 Jan 2025 15:03:07 +0800
+Subject: [PATCH] Patch commit
+
+---
+ .gitignore  |   3 ++
+ Cargo.toml  |   8 ++++
+ pack.sh     | 108 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/main.rs | 109 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 228 insertions(+)
+ create mode 100644 .gitignore
+ create mode 100644 Cargo.toml
+ create mode 100644 pack.sh
+ create mode 100644 src/main.rs
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..01b9114
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,3 @@
++target/
++*.patch
++Cargo.lock
+\ No newline at end of file
+diff --git a/Cargo.toml b/Cargo.toml
+new file mode 100644
+index 0000000..c86b175
+--- /dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,8 @@
++[package]
++name = "rust_write_ssd"
++version = "0.1.0"
++edition = "2021"
++
++[dependencies]
++clap = { version = "4.4.18", features = ["derive"] }
++rand = "0.8.5"
+diff --git a/pack.sh b/pack.sh
+new file mode 100644
+index 0000000..4f4f807
+--- /dev/null
++++ b/pack.sh
+@@ -0,0 +1,108 @@
++#!/bin/bash
++set -e
++
++show_help() {
++    echo "Usage: $0 [-e exclude_pattern]... <source-dir> <include-patterns...>"
++    echo "Example:"
++    echo "  $0 -e '*.tmp' -e 'temp/**' . '*'"
++    echo "  $0 -e '.*' /project 'Cargo.*'"
++}
++
++# Parse command-line options
++exclude_patterns=()
++while getopts "e:h" opt; do
++    case $opt in
++        e) exclude_patterns+=("$OPTARG") ;;
++        h) show_help; exit 0 ;;
++        *) show_help >&2; exit 1 ;;
++    esac
++done
++shift $((OPTIND - 1))
++
++if [[ $# -lt 2 ]]; then
++    show_help >&2
++    exit 1
++fi
++
++source_dir=$(realpath "$1")
++shift
++include_patterns=("$@")
++
++temp_dir=$(mktemp -d)
++trap 'rm -rf "$temp_dir"' EXIT
++
++export GIT_AUTHOR_NAME="Patch Creator"
++export GIT_AUTHOR_EMAIL="patch@example.com"
++export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
++export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
++
++(
++    cd "$source_dir"
++    shopt -s globstar nullglob dotglob
++
++    # Process includes with directory expansion
++    included_files=()
++    for pattern in "${include_patterns[@]}"; do
++        [[ -d "$pattern" ]] && pattern="$pattern/**/*"
++        
++        if [[ "$pattern" == */* ]]; then
++            while IFS= read -r -d $'\0' file; do
++                included_files+=("$file")
++            done < <(find . -path "./${pattern#./}" -print0 2>/dev/null)
++        else
++            while IFS= read -r -d $'\0' file; do
++                included_files+=("$file")
++            done < <(find . -name "$pattern" -print0 2>/dev/null)
++        fi
++    done
++
++    # Process excludes with directory expansion
++    excluded_files=()
++    for pattern in "${exclude_patterns[@]}"; do
++        [[ "$pattern" == */ ]] && pattern="${pattern}**/*"  # Directory exclusion
++        [[ -d "$pattern" ]] && pattern="$pattern/**/*"
++        
++        if [[ "$pattern" == */* ]]; then
++            while IFS= read -r -d $'\0' file; do
++                excluded_files+=("$file")
++            done < <(find . -path "./${pattern#./}" -print0 2>/dev/null)
++        else
++            while IFS= read -r -d $'\0' file; do
++                excluded_files+=("$file")
++            done < <(find . -name "$pattern" -print0 2>/dev/null)
++        fi
++    done
++
++    # Create exclusion map with realpath for accuracy
++    declare -A exclusion_map
++    for file in "${excluded_files[@]}"; do
++        exclusion_map["$(realpath -m "$file")"]=1
++    done
++
++    # Filter files using hashmap with full paths
++    filtered_files=()
++    for file in "${included_files[@]}"; do
++        full_path=$(realpath -m "$file")
++        [[ ! ${exclusion_map["$full_path"]} ]] && filtered_files+=("$file")
++    done
++
++    if [[ ${#filtered_files[@]} -gt 0 ]]; then
++        rsync -aR --files-from=<(printf "%s\n" "${filtered_files[@]}") . "$temp_dir"
++    fi
++)
++
++(
++    cd "$temp_dir"
++    if [[ -n $(find . -mindepth 1 -print -quit) ]]; then
++        git init --quiet
++        git add . > /dev/null
++        git commit --quiet -m "Patch commit"
++        git format-patch --root --stdout > "../output.patch"
++    else
++        echo "Error: No files matched after exclusions" >&2
++        exit 1
++    fi
++)
++
++mv "$temp_dir/../output.patch" .
++echo "Patch created: output.patch"
+diff --git a/src/main.rs b/src/main.rs
+new file mode 100644
+index 0000000..52848b1
+--- /dev/null
++++ b/src/main.rs
+@@ -0,0 +1,109 @@
++use clap::Parser;
++use std::fs::File;
++use std::io::{Read, Write};
++use std::os::unix::fs::FileExt;
++use std::time::Instant;
++use std::fs;
++
++#[derive(Parser, Debug)]
++#[command(
++    version,
++    about = "SSD Benchmark Tool",
++    long_about = "Measures sequential read/write speeds and random read performance of storage devices"
++)]
++struct Args {
++    /// Path to the test file (including filename)
++    #[arg(short, long)]
++    file: String,
++
++    /// File size to test with (e.g., 1G, 500M)
++    #[arg(short, long, default_value_t = String::from("1G"))]
++    file_size: String,
++
++    /// Buffer size for operations (e.g., 4096)
++    #[arg(short, long, default_value_t = 4096, value_parser = parse_size)]
++    buffer_size: usize,
++}
++
++fn parse_size(s: &str) -> Result<usize, String> {
++    let s = s.to_uppercase();
++    let mut multiplier = 1;
++    let (num_part, unit) = match s.find(|c: char| !c.is_digit(10)) {
++        Some(pos) => s.split_at(pos),
++        None => (&s[..], ""),
++    };
++
++    match unit {
++        "K" => multiplier = 1024,
++        "M" => multiplier = 1024 * 1024,
++        "G" => multiplier = 1024 * 1024 * 1024,
++        "" => multiplier = 1,
++        _ => return Err(format!("Invalid size unit: {}", unit)),
++    }
++
++    num_part.parse::<usize>()
++        .map(|n| n * multiplier)
++        .map_err(|_| format!("Invalid number format: {}", num_part))
++}
++
++fn main() -> std::io::Result<()> {
++    let args = Args::parse();
++    
++    // Parse file size
++    let file_size = parse_size(&args.file_size)
++        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
++
++    // Validate buffer size
++    if args.buffer_size > file_size {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::InvalidInput,
++            "Buffer size cannot be larger than file size",
++        ));
++    }
++
++    // Clean up any previous test file
++    let _ = fs::remove_file(&args.file);
++
++    // Sequential write test
++    let start_write = Instant::now();
++    let mut file = File::create(&args.file)?;
++    let data = vec![0u8; file_size];
++    file.write_all(&data)?;
++    file.sync_all()?;
++    let write_duration = start_write.elapsed();
++    
++    // Sequential read test
++    let start_read = Instant::now();
++    let mut file = File::open(&args.file)?;
++    let mut buffer = Vec::with_capacity(file_size);
++    file.read_to_end(&mut buffer)?;
++    let read_duration = start_read.elapsed();
++    
++    // Random read test
++    let start_random = Instant::now();
++    let file = File::open(&args.file)?;
++    for _ in 0..10_000 {
++        let offset = (rand::random::<usize>() % (file_size - args.buffer_size)) as u64;
++        let mut buffer = vec![0u8; args.buffer_size];
++        file.read_exact_at(&mut buffer, offset)?;
++    }
++    let random_duration = start_random.elapsed();
++
++    // Clean up
++    fs::remove_file(&args.file)?;
++
++    // Print results
++    println!("Test parameters:");
++    println!("- File size: {}", args.file_size);
++    println!("- Buffer size: {} bytes", args.buffer_size);
++    println!("\nResults:");
++    println!("Sequential Write Speed: {:.2} MB/s", 
++        (file_size as f64 / 1024.0 / 1024.0) / write_duration.as_secs_f64());
++    println!("Sequential Read Speed:  {:.2} MB/s", 
++        (file_size as f64 / 1024.0 / 1024.0) / read_duration.as_secs_f64());
++    println!("Random Read Speed:      {:.2} IOPS ({} byte operations)", 
++        10_000 as f64 / random_duration.as_secs_f64(),
++        args.buffer_size);
++
++    Ok(())
++}
+-- 
+2.43.0
+
