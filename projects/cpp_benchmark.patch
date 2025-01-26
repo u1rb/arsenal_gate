@@ -1,0 +1,845 @@
+From 8d4e8f01781b70ffaa4c78bb75bdad1c43bef6ce Mon Sep 17 00:00:00 2001
+From: Patch Creator <patch@example.com>
+Date: Sun, 26 Jan 2025 23:31:28 +0800
+Subject: [PATCH] Patch commit
+
+---
+ ringbuffer3.cpp | 826 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 826 insertions(+)
+ create mode 100644 ringbuffer3.cpp
+
+diff --git a/ringbuffer3.cpp b/ringbuffer3.cpp
+new file mode 100644
+index 0000000..e6ad103
+--- /dev/null
++++ b/ringbuffer3.cpp
+@@ -0,0 +1,826 @@
++/*
++    TODO:
++    - update interface to mimic Rust VecDeque
++        1. capacity() -> size_t, size() -> size_t, len() -> size_t, is_empty() -> bool
++        2. reserve(size_t new_capacity) -> void
++        3. begin(), end(), rbegin(), rend() -> iterator
++        4. linear_partition_point(predicate) -> iterator
++*/
++
++#include <algorithm>
++#include <cassert>
++#include <chrono>
++#include <cstddef>
++#include <iostream>
++#include <random>
++#include <stdexcept>
++#include <vector>
++
++template <typename T>
++class RingBuffer3 {
++public:
++    explicit RingBuffer3(size_t initial_capacity = 10) {
++        _data.resize(initial_capacity);
++        _capacity = initial_capacity;
++        _head = 0;
++        _tail = 0;
++        _current_size = 0;
++    }
++
++    void push_back(const T& value) {
++        if (_current_size == _capacity) {
++            grow();
++        }
++        _data[_tail] = value;
++        _tail = (_tail + 1) % _capacity;
++        _current_size++;
++    }
++
++    T pop_front() {
++        if (_current_size == 0) {
++            throw std::out_of_range("RingBuffer is empty");
++        }
++        T value = _data[_head];
++        _head = (_head + 1) % _capacity;
++        _current_size--;
++        return value;
++    }
++
++    class iterator;
++
++    iterator insert(iterator pos, const T& value) {
++        size_t offset = pos.get_offset();
++        insert(offset, value);
++        return iterator(this, offset);
++    }
++
++    iterator erase(iterator pos) {
++        size_t offset = pos.get_offset();
++        erase(offset);
++        return iterator(this, offset);
++    }
++
++    void insert(size_t pos, const T& value) {
++        if (pos > _current_size) {
++            throw std::out_of_range("Insert position out of range");
++        }
++        if (_current_size == _capacity) {
++            grow();
++        }
++        if (pos == 0) {
++            // Insert at front
++            _head = (_head - 1 + _capacity) % _capacity;
++            _data[_head] = value;
++        } else if (pos == _current_size) {
++            // Insert at back
++            _data[_tail] = value;
++            _tail = (_tail + 1) % _capacity;
++        } else {
++            size_t k = pos;
++            size_t physical_pos = (_head + k) % _capacity;
++            size_t left_moves = k;
++            size_t right_moves = _current_size - k;
++
++            if (left_moves <= right_moves) {
++                // Shift left part to the left
++                for (size_t i = 0; i < k; ++i) {
++                    size_t src = (_head + i) % _capacity;
++                    size_t dst = (src - 1 + _capacity) % _capacity;
++                    _data[dst] = std::move(_data[src]);
++                }
++                _head = (_head - 1 + _capacity) % _capacity;
++                physical_pos = (_head + k) % _capacity;
++            } else {
++                // Shift right part to the right
++                for (size_t i = _current_size; i > k; --i) {
++                    size_t src = (_head + i - 1) % _capacity;
++                    size_t dst = (src + 1) % _capacity;
++                    _data[dst] = std::move(_data[src]);
++                }
++                _tail = (_tail + 1) % _capacity;
++                physical_pos = (_head + k) % _capacity;
++            }
++            _data[physical_pos] = value;
++        }
++        _current_size++;
++    }
++
++    T erase(size_t pos) {
++        if (pos >= _current_size) {
++            throw std::out_of_range("Erase position out of range");
++        }
++        if (pos == 0) {
++            return pop_front();
++        } else if (pos == _current_size - 1) {
++            // Pop back
++            _tail = (_tail - 1 + _capacity) % _capacity;
++            T value = _data[_tail];
++            _current_size--;
++            return value;
++        } else {
++            size_t k = pos;
++            size_t physical_pos = (_head + k) % _capacity;
++            T value = _data[physical_pos];
++            size_t left_moves = k;
++            size_t right_moves = _current_size - k - 1;
++
++            if (left_moves <= right_moves) {
++                // Shift left part to the right
++                for (size_t i = k; i > 0; --i) {
++                    size_t dst = (_head + i) % _capacity;
++                    size_t src = (_head + i - 1) % _capacity;
++                    _data[dst] = std::move(_data[src]);
++                }
++                _head = (_head + 1) % _capacity;
++            } else {
++                // Shift right part to the left
++                for (size_t i = k + 1; i < _current_size; ++i) {
++                    size_t dst = (_head + i - 1) % _capacity;
++                    size_t src = (_head + i) % _capacity;
++                    _data[dst] = std::move(_data[src]);
++                }
++                _tail = (_tail - 1 + _capacity) % _capacity;
++            }
++            _current_size--;
++            return value;
++        }
++    }
++    void clear() {
++        _head = 0;
++        _tail = 0;
++        _current_size = 0;
++    }
++
++    size_t size() const {
++        return _current_size;
++    }
++    bool empty() const {
++        return _current_size == 0;
++    }
++    size_t capacity() const {
++        return _capacity;
++    }
++
++    // Iterator implementation
++    class iterator {
++    public:
++        using iterator_category = std::forward_iterator_tag;
++        using value_type = T;
++        using difference_type = std::ptrdiff_t;
++        using pointer = T*;
++        using reference = T&;
++
++        /*
++        constructor, initialize with ringbuffer and offset, offset is logical offset from the head
++        For example, we have a ringbuffer in contiguous memory
++                        [ 4, 5, _ , 1, 2, 3]
++                        head = 3
++                        tail = 2
++                        current_size = head - tail + capacity
++            if offset is 2, then the iterator points to the element value 3 because v[3+2] == 3
++        */
++        iterator(RingBuffer3* rb, size_t offset) : rb(rb), offset(offset) {}
++
++        iterator operator+(size_t n) const {
++            return iterator(rb, offset + n);
++        }
++
++        iterator operator-(size_t n) const {
++            if (n > offset) {
++                throw std::out_of_range("Iterator subtraction out of range");
++            }
++            return iterator(rb, offset - n);
++        }
++
++        reference operator*() const {
++            if (offset >= rb->size()) {
++                throw std::out_of_range("Iterator dereference out of range");
++            }
++            return rb->_data[(rb->_head + offset) % rb->_capacity];
++        }
++
++        pointer operator->() const {
++            if (offset >= rb->size()) {
++                throw std::out_of_range("Iterator arrow operator out of range");
++            }
++            return &(rb->_data[(rb->_head + offset) % rb->_capacity]);
++        }
++
++        iterator& operator++() {
++            ++offset;
++            return *this;
++        }
++
++        iterator operator++(int) {
++            iterator tmp = *this;
++            ++offset;
++            return tmp;
++        }
++
++        bool operator==(const iterator& other) const {
++            return rb == other.rb && offset == other.offset;
++        }
++
++        bool operator!=(const iterator& other) const {
++            return !(*this == other);
++        }
++
++        size_t get_offset() const {
++            return offset;
++        }
++
++    private:
++        size_t offset;  // Logical offset from the head
++        RingBuffer3* rb;
++    };
++
++    iterator begin() {
++        return iterator(this, 0);
++    }
++
++    iterator end() {
++        return iterator(this, _current_size);
++    }
++
++    template <typename Predicate>
++    iterator linear_partition_point(Predicate pred) {
++        // Returns the first iterator where pred returns false using linear search
++        // If all elements satisfy pred, returns end()
++        // Implements partition point via linear scan rather than binary search
++        iterator it = begin();
++        while (it != end() && pred(*it)) {
++            ++it;
++        }
++        return it;
++    }
++
++    void reserve(size_t new_capacity) {
++        if (new_capacity <= _capacity) {
++            return;
++        }
++        std::vector<T> new_data(new_capacity);
++
++        // Copy data in logical order
++        for (size_t i = 0; i < _current_size; ++i) {
++            new_data[i] = _data[(_head + i) % _capacity];
++        }
++
++        _head = 0;
++        _tail = _current_size;
++        _data = std::move(new_data);
++        _capacity = new_capacity;
++    }
++
++    // Returns a copy of the ringbuffer data in contiguous memory
++    std::vector<T> copy_continous_data() const {
++        std::vector<T> result(_current_size);
++        for (size_t i = 0; i < _current_size; ++i) {
++            result[i] = _data[(_head + i) % _capacity];
++        }
++        return result;
++    }
++
++private:
++    std::vector<T> _data;
++    size_t _head;
++    size_t _tail;
++    size_t _current_size;
++    size_t _capacity;
++
++    void grow() {
++        size_t new_capacity = _capacity * 2;
++        reserve(new_capacity);
++    }
++};
++
++// Unit tests
++void test_ring_buffer() {
++    // Test 1: Empty buffer
++    {
++        RingBuffer3<int> rb(5);
++        assert(rb.size() == 0);
++        assert(rb.empty());
++        assert(rb.capacity() == 5);
++    }
++
++    // Test 2: Push and pop single element
++    {
++        RingBuffer3<int> rb(5);
++        rb.push_back(42);
++        assert(rb.size() == 1);
++        assert(!rb.empty());
++        assert(rb.pop_front() == 42);
++        assert(rb.size() == 0);
++        assert(rb.empty());
++    }
++
++    // Test 3: Fill initial capacity and check growth
++    {
++        RingBuffer3<int> rb(2);
++        assert(rb.capacity() == 2);
++        rb.push_back(1);
++        rb.push_back(2);
++        assert(rb.capacity() == 2);
++        assert(rb.size() == 2);
++        rb.push_back(3);
++        assert(rb.capacity() == 4);
++        assert(rb.size() == 3);
++        assert(rb.pop_front() == 1);
++        assert(rb.pop_front() == 2);
++        assert(rb.pop_front() == 3);
++    }
++
++    // Test 4: Wrap-around behavior and growth
++    {
++        RingBuffer3<int> rb(3);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.pop_front();
++        rb.push_back(3);
++        rb.push_back(4);
++        assert(rb.size() == 3);
++        assert(rb.capacity() == 3);
++        rb.push_back(5);
++        assert(rb.capacity() == 6);
++        assert(rb.size() == 4);
++        assert(rb.pop_front() == 2);
++        assert(rb.pop_front() == 3);
++        assert(rb.pop_front() == 4);
++        assert(rb.pop_front() == 5);
++    }
++
++    // Test 5: Iterator after wrap-around
++    {
++        RingBuffer3<int> rb(3);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.pop_front();
++        rb.push_back(3);
++        rb.push_back(4);
++
++        std::vector<int> expected = {2, 3, 4};
++        std::vector<int> actual;
++        for (int val : rb) {
++            actual.push_back(val);
++        }
++        assert(actual == expected);
++    }
++
++    // Test 6: Iterator with elements wrapped around
++    {
++        RingBuffer3<int> rb(3);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.pop_front();
++        rb.push_back(3);
++
++        std::vector<int> expected = {2, 3};
++        std::vector<int> actual;
++        for (int val : rb) {
++            actual.push_back(val);
++        }
++        assert(actual == expected);
++    }
++
++    // Test 7: Multiple growths
++    {
++        RingBuffer3<int> rb(2);
++        for (int i = 1; i <= 5; ++i) {
++            rb.push_back(i);
++        }
++        assert(rb.size() == 5);
++        assert(rb.capacity() == 8);
++        std::vector<int> expected = {1, 2, 3, 4, 5};
++        std::vector<int> actual;
++        for (int val : rb) {
++            actual.push_back(val);
++        }
++        assert(actual == expected);
++    }
++
++    // Test 8: Insert at front
++    {
++        RingBuffer3<int> rb(3);
++        rb.insert(0, 1);
++        rb.insert(0, 2);
++        rb.insert(0, 3);
++        assert(rb.size() == 3);
++        assert(rb.capacity() == 3);
++        assert(rb.pop_front() == 3);
++        assert(rb.pop_front() == 2);
++        assert(rb.pop_front() == 1);
++    }
++
++    // Test 9: Insert in middle with minimal shifts
++    {
++        RingBuffer3<int> rb(5);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.push_back(4);
++        rb.insert(2, 3);  // Insert between 2 and 4
++        std::vector<int> expected = {1, 2, 3, 4};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 10: Erase from middle
++    {
++        RingBuffer3<int> rb(5);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.push_back(3);
++        rb.push_back(4);
++        rb.erase(1);  // Erase 2
++        std::vector<int> expected = {1, 3, 4};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 11: Insert and Erase causing wrap-around
++    {
++        RingBuffer3<int> rb(3);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.pop_front();
++        rb.push_back(3);
++        rb.insert(1, 4);  // Insert at position 1 in [2,3]
++        assert(rb.size() == 3);
++        std::vector<int> expected = {2, 4, 3};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 12: Insert at back
++    {
++        RingBuffer3<int> rb(3);
++        rb.insert(0, 1);
++        rb.insert(1, 2);
++        rb.insert(2, 3);
++        assert(rb.size() == 3);
++        std::vector<int> expected = {1, 2, 3};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 13: Erase from front
++    {
++        RingBuffer3<int> rb(3);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.erase(0);
++        assert(rb.size() == 1);
++        assert(rb.pop_front() == 2);
++    }
++
++    // Test 8: Insert at front using iterator
++    {
++        RingBuffer3<int> rb(3);
++        rb.insert(rb.begin(), 1);
++        rb.insert(rb.begin(), 2);
++        rb.insert(rb.begin(), 3);
++        assert(rb.size() == 3);
++        assert(rb.capacity() == 3);
++        assert(rb.pop_front() == 3);
++        assert(rb.pop_front() == 2);
++        assert(rb.pop_front() == 1);
++    }
++
++    // Test 9: Insert in middle with minimal shifts using iterator
++    {
++        RingBuffer3<int> rb(5);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.push_back(4);
++        auto it = rb.begin();
++        ++it;
++        ++it;              // points to position 2 (value 4)
++        rb.insert(it, 3);  // Insert between 2 and 4
++        std::vector<int> expected = {1, 2, 3, 4};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 10: Erase from middle using iterator
++    {
++        RingBuffer3<int> rb(5);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.push_back(3);
++        rb.push_back(4);
++        auto it = rb.begin();
++        ++it;          // points to position 1 (value 2)
++        rb.erase(it);  // Erase 2
++        std::vector<int> expected = {1, 3, 4};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 11: Insert and Erase causing wrap-around using iterators
++    {
++        RingBuffer3<int> rb(3);
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.pop_front();
++        rb.push_back(3);
++        auto it = rb.begin();
++        ++it;              // points to position 1 (value 3)
++        rb.insert(it, 4);  // Insert at position 1 in [2,3]
++        assert(rb.size() == 3);
++        std::vector<int> expected = {2, 4, 3};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 12: Insert at back using iterator
++    {
++        RingBuffer3<int> rb(3);
++        rb.insert(rb.end(), 1);
++        rb.insert(rb.end(), 2);
++        rb.insert(rb.end(), 3);
++        assert(rb.size() == 3);
++        std::vector<int> expected = {1, 2, 3};
++        std::vector<int> actual(rb.begin(), rb.end());
++        assert(actual == expected);
++    }
++
++    // Test 13: Erase from front using iterator
++    {
++        RingBuffer3<int> rb(3);
++        rb.push_back(1);
++        rb.push_back(2);
++        auto it = rb.begin();
++        rb.erase(it);
++        assert(rb.size() == 1);
++        assert(rb.pop_front() == 2);
++    }
++
++    // Test 14: Partition point basic functionality
++    {
++        RingBuffer3<int> rb;
++        rb.push_back(1);
++        rb.push_back(3);
++        rb.push_back(5);
++        rb.push_back(7);
++        rb.push_back(9);
++
++        auto it = rb.linear_partition_point([](int x) { return x < 6; });
++        assert(it != rb.end());
++        assert(*it == 7);
++        assert(it.get_offset() == 3);
++    }
++
++    // Test 15: All elements satisfy predicate
++    {
++        RingBuffer3<int> rb;
++        rb.push_back(2);
++        rb.push_back(4);
++        rb.push_back(6);
++
++        auto it = rb.linear_partition_point([](int x) { return x % 2 == 0; });
++        assert(it == rb.end());
++    }
++
++    // Test 16: No elements satisfy predicate
++    {
++        RingBuffer3<int> rb;
++        rb.push_back(1);
++        rb.push_back(3);
++        rb.push_back(5);
++
++        auto it = rb.linear_partition_point([](int x) { return x % 2 == 0; });
++        assert(it == rb.begin());
++    }
++    // Test 17: Compare with std::partition_point on partitioned data
++    {
++        RingBuffer3<int> rb;
++        rb.push_back(2);
++        rb.push_back(4);
++        rb.push_back(6);
++        rb.push_back(1);
++        rb.push_back(3);
++        rb.push_back(5);
++
++        auto custom_pp = rb.linear_partition_point([](int x) { return x % 2 == 0; });
++        auto std_pp = std::partition_point(rb.begin(), rb.end(), [](int x) { return x % 2 == 0; });
++
++        if (!(custom_pp.get_offset() == std_pp.get_offset())) {
++            std::cout << "Assertion failed: custom_pp offset (" << custom_pp.get_offset()
++                      << ") != std_pp offset (" << std_pp.get_offset() << ")\n";
++            assert(false);
++        }
++        assert((custom_pp == rb.end()) == (std_pp == rb.end()));
++    }
++
++    // Test 18: Compare with std::partition_point on unpartitioned data with clear point
++    {
++        RingBuffer3<int> rb;
++        rb.push_back(1);
++        rb.push_back(3);
++        rb.push_back(5);
++        rb.push_back(7);
++        rb.push_back(6);
++        rb.push_back(8);
++
++        auto custom_pp = rb.linear_partition_point([](int x) { return x < 6; });
++        auto std_pp = std::partition_point(rb.begin(), rb.end(), [](int x) { return x < 6; });
++
++        assert(custom_pp.get_offset() == std_pp.get_offset());
++        assert(*custom_pp == *std_pp);
++    }
++
++    // Test 19: Compare with std::partition_point on wrapped buffer
++    {
++        RingBuffer3<int> rb(4);
++        rb.push_back(7);
++        rb.push_back(8);
++        rb.push_back(9);
++        rb.pop_front();
++        rb.pop_front();
++        rb.pop_front();
++        rb.push_back(1);
++        rb.push_back(2);
++        rb.push_back(3);  // Physical layout: [7,8,9,1,2,3] with head=3, tail=3
++        rb.push_back(5);
++        rb.push_back(7);
++        rb.push_back(9);
++
++        auto continuous_data = rb.copy_continous_data();
++        assert(continuous_data == std::vector<int>({1, 2, 3, 5, 7, 9}));
++
++        auto custom_pp = rb.linear_partition_point([](int x) { return x < 5; });
++        auto std_pp = std::partition_point(rb.begin(), rb.end(), [](int x) { return x < 5; });
++
++        if (!(custom_pp.get_offset() == std_pp.get_offset())) {
++            std::cout << "Assertion failed: custom_pp offset (" << custom_pp.get_offset()
++                      << ") != std_pp offset (" << std_pp.get_offset() << ")\n";
++            assert(false);
++        }
++        assert((custom_pp == rb.end()) == (std_pp == rb.end()));
++    }
++
++    // Test 20: Compare edge case - all elements satisfy predicate
++    {
++        RingBuffer3<int> rb;
++        rb.push_back(2);
++        rb.push_back(4);
++        rb.push_back(6);
++
++        auto custom_pp = rb.linear_partition_point([](int x) { return x % 2 == 0; });
++        auto std_pp = std::partition_point(rb.begin(), rb.end(), [](int x) { return x % 2 == 0; });
++
++        assert(custom_pp == rb.end());
++        assert(std_pp == rb.end());
++    }
++
++    // Test 21: Compare edge case - no elements satisfy predicate
++    {
++        RingBuffer3<int> rb;
++        rb.push_back(1);
++        rb.push_back(3);
++        rb.push_back(5);
++
++        auto custom_pp = rb.linear_partition_point([](int x) { return x % 2 == 0; });
++        auto std_pp = std::partition_point(rb.begin(), rb.end(), [](int x) { return x % 2 == 0; });
++
++        assert(custom_pp == rb.begin());
++        assert(std_pp == rb.begin());
++    }
++
++    // Test 22: Use random input to test correctness
++    {
++        std::cout << "Testing correctness with random input" << std::endl;
++
++        auto const NUM_OPERATIONS = 10000;
++        auto const INITIAL_SIZE = 10000;
++
++        std::random_device rd;
++        std::mt19937 gen(rd());
++        std::uniform_int_distribution<> dis_for_random_idx(0, INITIAL_SIZE - 1);
++
++        RingBuffer3<int> rb(NUM_OPERATIONS);
++        auto std_vec = std::vector<int>{};
++        std_vec.reserve(NUM_OPERATIONS);
++
++        // Generate random input
++        std::vector<int> random_input;
++        for (int i = 0; i < INITIAL_SIZE; ++i) {
++            random_input.push_back(dis_for_random_idx(gen));
++        }
++
++        // Initialize both containers with INITIAL_SIZE elements
++        for (auto x : random_input) {
++            rb.push_back(x);
++            std_vec.push_back(x);
++        }
++        // Insert operations
++        for (int i = 0; i < NUM_OPERATIONS; ++i) {
++            size_t pos = random_input[i % INITIAL_SIZE] % (rb.size() + 1);  // Ensure valid position
++            rb.insert(pos, random_input[i % INITIAL_SIZE]);
++            std_vec.insert(std_vec.begin() + pos, random_input[i % INITIAL_SIZE]);
++        }
++
++        // Delete operations
++        for (int i = 0; i < NUM_OPERATIONS; ++i) {
++            if (!rb.empty()) {
++                size_t pos = random_input[i % INITIAL_SIZE] % rb.size();  // Ensure valid position
++                rb.erase(pos);
++                std_vec.erase(std_vec.begin() + pos);
++            }
++        }
++        assert(rb.size() == std_vec.size());
++        assert(rb.capacity() == std_vec.capacity());
++        assert(rb.copy_continous_data() == std_vec);
++    }
++
++    // Test 23: benchmark, compare with std::vector when performing random insertions and deletions
++    {
++        const int NUM_OPERATIONS = 1000000;
++        const int INITIAL_SIZE = 5000;
++        const int MODIFY_INDEX_RANGE = 10;
++        std::cout << "Benchmarking RingBuffer3 vs std::vector for " << NUM_OPERATIONS
++                  << " operations" << std::endl;
++
++        std::random_device rd;
++        std::mt19937 gen(rd());
++        std::uniform_int_distribution<> initial_value_dis(0, 100);
++        std::uniform_int_distribution<> pos_dis(0,
++                                                MODIFY_INDEX_RANGE);  // Random position in [0,100]
++        std::uniform_int_distribution<> op_dis(0, 1);                 // 0 for insert, 1 for delete
++
++        // Pre-generate all random numbers
++        std::vector<int> random_positions(NUM_OPERATIONS);
++        std::vector<int> random_values(NUM_OPERATIONS);
++        std::vector<bool> is_insert(NUM_OPERATIONS);
++
++        for (int i = 0; i < NUM_OPERATIONS; ++i) {
++            random_positions[i] = pos_dis(gen);
++            random_values[i] = initial_value_dis(gen);
++            is_insert[i] = op_dis(gen) == 0;
++        }
++
++        // Create and initialize RingBuffer3
++        RingBuffer3<int> rb(INITIAL_SIZE);
++        for (int i = 0; i < INITIAL_SIZE; ++i) {
++            rb.push_back(i);
++        }
++
++        // Create and initialize std::vector
++        std::vector<int> std_vec;
++        std_vec.reserve(INITIAL_SIZE);
++        for (int i = 0; i < INITIAL_SIZE; ++i) {
++            std_vec.push_back(i);
++        }
++
++        // Benchmark RingBuffer3
++        auto start_rb = std::chrono::high_resolution_clock::now();
++        for (int i = 0; i < NUM_OPERATIONS; ++i) {
++            size_t pos = random_positions[i] % (rb.size() + 1);  // Ensure valid position
++            if (is_insert[i]) {                                  // Insert
++                rb.insert(pos, random_values[i]);
++            } else if (!rb.empty()) {   // Delete
++                pos = pos % rb.size();  // Recalculate position for deletion
++                rb.erase(pos);
++            }
++        }
++        auto end_rb = std::chrono::high_resolution_clock::now();
++        auto duration_rb = std::chrono::duration_cast<std::chrono::microseconds>(end_rb - start_rb);
++
++        // Reset vector to initial state
++        std_vec.clear();
++        std_vec.reserve(INITIAL_SIZE);
++        for (int i = 0; i < INITIAL_SIZE; ++i) {
++            std_vec.push_back(i);
++        }
++
++        // Benchmark std::vector
++        auto start_vec = std::chrono::high_resolution_clock::now();
++        for (int i = 0; i < NUM_OPERATIONS; ++i) {
++            size_t pos = random_positions[i] % (std_vec.size() + 1);  // Ensure valid position
++            if (is_insert[i]) {                                       // Insert
++                std_vec.insert(std_vec.begin() + pos, random_values[i]);
++            } else if (!std_vec.empty()) {   // Delete
++                pos = pos % std_vec.size();  // Recalculate position for deletion
++                std_vec.erase(std_vec.begin() + pos);
++            }
++        }
++        auto end_vec = std::chrono::high_resolution_clock::now();
++        auto duration_vec =
++            std::chrono::duration_cast<std::chrono::microseconds>(end_vec - start_vec);
++
++        std::cout << "Benchmark results for " << NUM_OPERATIONS << " operations:" << std::endl;
++        std::cout << "RingBuffer3: " << duration_rb.count() << " microseconds" << std::endl;
++        std::cout << "std::vector: " << duration_vec.count() << " microseconds" << std::endl;
++        std::cout << "RingBuffer3 is "
++                  << static_cast<double>(duration_vec.count()) / duration_rb.count()
++                  << "x faster than std::vector" << std::endl;
++
++        assert(rb.copy_continous_data() == std_vec);
++    }
++
++    std::cout << "All tests passed!" << std::endl;
++}
++
++int main() {
++    test_ring_buffer();
++    return 0;
++}
+-- 
+2.43.0
+
