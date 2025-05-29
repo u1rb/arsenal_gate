@@ -11,18 +11,32 @@ for arg in "$@"; do
             FOUND_CELL_ARG=true
             ;;
         help|--help|-h)
-            echo "Usage: $0 [--cell=write|read|build|format|clean]"
+            echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading]"
+            echo ""
+            echo "Available cells:"
+            echo "  build      - Build all examples"
+            echo "  write      - Create test Parquet files"
+            echo "  read       - Test both synchronous and threaded reading"
+            echo "  threading  - Dedicated threading performance tests"
+            echo "  cpp_writer - Test C++ writer examples"
+            echo "  format     - Format C/C++ code with clang-format"
+            echo "  clean      - Clean build artifacts"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --cell=build,write,read          # Standard test sequence"
+            echo "  $0 --cell=build,write,threading     # Focus on threading performance"
+            echo "  $0 --cell=format,build,write,read   # Format code and test"
             ;;
         *)
             echo "Error: Unknown argument '$arg'"
-            echo "Usage: $0 [--cell=write|read|build|format|clean]"
+            echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading]"
             ;;
     esac
 done
 
 if [ -z "$CELLS" ]; then
     echo "Error: No cells specified"
-    echo "Usage: $0 [--cell=write|read|build|format|clean]"
+    echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading]"
     exit 1
 fi
 
@@ -51,8 +65,8 @@ if has_cell "format"; then
         exit 1
     fi
     
-    # Format all C/C++ files in cxx_examples directory (excluding build directories)
-    find cxx_examples -name "build" -prune -o -name "_deps" -prune -o \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) -print | while read -r file; do
+    # Format all C/C++ files in cxx_examples and include/ directory (excluding build directories)
+    find cxx_examples include -name "build" -prune -o -name "_deps" -prune -o \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) -print | while read -r file; do
         echo "Formatting: $file"
         clang-format -i "$file"
     done
@@ -87,9 +101,84 @@ fi
 
 
 if has_cell "read"; then
+    echo "=== Testing Synchronous Reading ==="
     ./a1_read_stream stream_output.parquet
     ./a1_read_stream stream_output.parquet stream_output.parquet
     ./a1_read_stream stream_output.parquet stream_output.parquet stream_output.parquet
+    
+    echo ""
+    echo "=== Testing Threaded Reading ==="
+    ./a1_read_stream --threaded stream_output.parquet
+    ./a1_read_stream --threaded stream_output.parquet stream_output.parquet
+    ./a1_read_stream --threaded stream_output.parquet stream_output.parquet stream_output.parquet
+    
+    echo ""
+    echo "=== Performance Comparison (Single File) ==="
+    echo "Synchronous mode:"
+    ./a1_read_stream stream_output.parquet | grep "Processed.*rows/sec"
+    echo "Threaded mode:"
+    ./a1_read_stream --threaded stream_output.parquet | grep "Processed.*rows/sec"
+fi
+
+if has_cell "threading"; then
+    echo "=== Threading Performance Tests ==="
+     
+    ITERATIONS=2
+    ROWS=100000000 # 100M rows
+    WRITE_BATCH_SIZE=65536
+    READ_BATCH_SIZE=1000000 # 1M rows
+
+    echo "Large file ($ROWS rows):"
+
+    # skip if file exists
+    if [ -f large_test.parquet ]; then
+        echo "File large_test.parquet already exists, skipping write"
+    else
+        echo "Writing file large_test.parquet"
+        time ./a0_write_stream large_test.parquet $ROWS $WRITE_BATCH_SIZE
+    fi
+    
+    echo ""
+    echo "=== Performance Comparison Tests ==="
+    
+    echo ""
+    echo "=== Full Processing Comparison ==="
+    echo "Synchronous mode ($ROWS rows with full processing):"
+    ./a1_read_stream \
+        --workload=heavy \
+        --iterations=$ITERATIONS \
+        --batch-size=$READ_BATCH_SIZE \
+        large_test.parquet | grep "Processed.*rows/sec"
+    
+    echo "Threaded mode ($ROWS rows with full processing):"
+    ./a1_read_stream \
+        --threaded \
+        --workload=heavy \
+        --iterations=$ITERATIONS \
+        --batch-size=$READ_BATCH_SIZE \
+        large_test.parquet | grep "Processed.*rows/sec"
+    
+    echo ""
+    echo "=== Cleanup ==="
+    #rm -rf large_test.parquet
+    
+    echo ""
+    echo "Threading performance tests completed!"
+    echo "See THREADING_PERFORMANCE_SUMMARY.md for detailed analysis."
+fi
+
+if has_cell "cpp_writer"; then
+    echo "=== Running C++ Writer Example ==="
+    rm -rf person_data.parquet binary_data.parquet
+    time ./cpp_writer_example
+    
+    echo "=== Verifying person_data.parquet ==="
+    duckdb -s "SELECT * FROM 'person_data.parquet' LIMIT 10;"
+    duckdb -s "SELECT COUNT(*) FROM 'person_data.parquet';"
+    
+    echo "=== Verifying binary_data.parquet ==="
+    duckdb -s "SELECT id, description, hex(binary_data), score FROM 'binary_data.parquet' LIMIT 10;"
+    duckdb -s "SELECT COUNT(*) FROM 'binary_data.parquet';"
 fi
 
 echo "Examples completed successfully!" 

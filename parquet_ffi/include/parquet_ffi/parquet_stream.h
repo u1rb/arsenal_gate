@@ -91,15 +91,15 @@ typedef struct {
 
 /**
  * Initialize Rust tracing/logging system for debugging
- * 
+ *
  * This function initializes the Rust tracing system which enables debug output
  * from the Rust backend. It's safe to call multiple times - initialization
  * will only happen once.
- * 
+ *
  * Call this function early in your application if you want to see debug output
  * from the parquet_ffi library. The logging level can be controlled with the
  * RUST_LOG environment variable (e.g., RUST_LOG=debug).
- * 
+ *
  * @return 0 on success, non-zero on error (currently always returns 0)
  */
 int parquet_ffi_init_tracing(void);
@@ -115,6 +115,19 @@ int parquet_ffi_init_tracing(void);
  */
 int export_parquet_file_to_stream(const char *path,
                                   struct ArrowArrayStream *out_stream);
+
+/**
+ * Export a Parquet file to an Arrow C Stream Interface with custom batch size
+ * This allows for efficient reading of Parquet data using the Arrow C Data
+ * Interface with control over the batch size for performance tuning
+ *
+ * @param path Path to the Parquet file
+ * @param out_stream Output parameter to receive the Arrow array stream
+ * @param batch_size Number of rows per batch (must be positive)
+ * @return 0 on success, non-zero on error (specific error codes TBD)
+ */
+int export_parquet_file_to_stream_with_batch_size(
+    const char *path, struct ArrowArrayStream *out_stream, int batch_size);
 
 /**
  * Initialize a streaming Parquet writer using data provided via an Arrow C

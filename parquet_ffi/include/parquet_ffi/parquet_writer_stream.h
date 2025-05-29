@@ -12,6 +12,10 @@
 #include "parquet_ffi/arrow_c.h"
 #include <parquet_ffi/parquet_stream.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // =============================================================================
 // Configuration and Constants
 // =============================================================================
@@ -134,7 +138,7 @@ typedef enum {
  */
 static inline const char *arrow_type_to_format(ArrowType type) {
   static char format[2] = {0, 0};
-  format[0] = (char) type;
+  format[0] = (char)type;
   return format;
 }
 
@@ -194,7 +198,8 @@ typedef struct {
  * Create default writer options with sensible defaults
  */
 static inline WriterOptions create_default_writer_options() {
-  WriterOptions options = {0};
+  WriterOptions options;
+  memset(&options, 0, sizeof(WriterOptions));
   options.compression = PARQUET_COMPRESSION_SNAPPY;
   options.compression_levels.gzip_level = 6;
   options.compression_levels.brotli_level = 1;
@@ -214,38 +219,38 @@ static inline WriterOptions create_default_writer_options() {
 /**
  * Create default column definition with sensible defaults
  */
-static inline ColumnDef create_column_def(const char *name,
-                                          const char *format,
+static inline ColumnDef create_column_def(const char *name, const char *format,
                                           bool nullable) {
-  ColumnDef col = {0};
+  ColumnDef col;
+  memset(&col, 0, sizeof(ColumnDef));
   col.name = name;
   col.format = format;
   col.nullable = nullable;
 
   // Set default encoding based on data type
   switch (format[0]) {
-    case 'i': // int32
-    case 'l': // int64
-    case 'I': // uint32
-    case 'L': // uint64
-      col.encoding = PARQUET_ENCODING_DELTA_BINARY_PACKED;
-      break;
-    case 'u': // string
-    case 'U': // large string
-      col.encoding = PARQUET_ENCODING_DICTIONARY;
-      col.use_dictionary = true;
-      break;
-    case 'z': // binary
-    case 'Z': // large binary
-      col.encoding = PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY;
-      break;
-    case 'f': // float
-    case 'g': // double
-      col.encoding = PARQUET_ENCODING_BYTE_STREAM_SPLIT;
-      break;
-    default:
-      col.encoding = PARQUET_ENCODING_PLAIN;
-      break;
+  case 'i': // int32
+  case 'l': // int64
+  case 'I': // uint32
+  case 'L': // uint64
+    col.encoding = PARQUET_ENCODING_DELTA_BINARY_PACKED;
+    break;
+  case 'u': // string
+  case 'U': // large string
+    col.encoding = PARQUET_ENCODING_DICTIONARY;
+    col.use_dictionary = true;
+    break;
+  case 'z': // binary
+  case 'Z': // large binary
+    col.encoding = PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY;
+    break;
+  case 'f': // float
+  case 'g': // double
+    col.encoding = PARQUET_ENCODING_BYTE_STREAM_SPLIT;
+    break;
+  default:
+    col.encoding = PARQUET_ENCODING_PLAIN;
+    break;
   }
 
   col.compression =
@@ -303,36 +308,36 @@ static inline ColumnDef create_column_def(const char *name,
 
 static inline size_t get_type_size(const char *format) {
   switch (format[0]) {
-    case 'b':
-      return sizeof(bool);
-    case 'c':
-      return sizeof(int8_t);
-    case 'C':
-      return sizeof(uint8_t);
-    case 's':
-      return sizeof(int16_t);
-    case 'S':
-      return sizeof(uint16_t);
-    case 'i':
-      return sizeof(int32_t);
-    case 'I':
-      return sizeof(uint32_t);
-    case 'l':
-      return sizeof(int64_t);
-    case 'L':
-      return sizeof(uint64_t);
-    case 'f':
-      return sizeof(float);
-    case 'g':
-      return sizeof(double);
-    case 'u':
-    case 'U':
-      return sizeof(int32_t); // string offset
-    case 'z':
-    case 'Z':
-      return 0; // Variable-length, no fixed size
-    default:
-      return 0;
+  case 'b':
+    return sizeof(bool);
+  case 'c':
+    return sizeof(int8_t);
+  case 'C':
+    return sizeof(uint8_t);
+  case 's':
+    return sizeof(int16_t);
+  case 'S':
+    return sizeof(uint16_t);
+  case 'i':
+    return sizeof(int32_t);
+  case 'I':
+    return sizeof(uint32_t);
+  case 'l':
+    return sizeof(int64_t);
+  case 'L':
+    return sizeof(uint64_t);
+  case 'f':
+    return sizeof(float);
+  case 'g':
+    return sizeof(double);
+  case 'u':
+  case 'U':
+    return sizeof(int32_t); // string offset
+  case 'z':
+  case 'Z':
+    return 0; // Variable-length, no fixed size
+  default:
+    return 0;
   }
 }
 
@@ -350,8 +355,8 @@ static inline int init_zerocopy_buffer(ZeroCopyBuffer *buf,
                                        size_t initial_offset_capacity) {
   memset(buf, 0, sizeof(ZeroCopyBuffer));
 
-  buf->data = malloc(initial_data_capacity);
-  buf->offsets = malloc(initial_offset_capacity * sizeof(int32_t));
+  buf->data = (uint8_t *)malloc(initial_data_capacity);
+  buf->offsets = (int32_t *)malloc(initial_offset_capacity * sizeof(int32_t));
 
   if (!buf->data || !buf->offsets) {
     free(buf->data);
@@ -385,7 +390,7 @@ static inline int ensure_zerocopy_data_capacity(ZeroCopyBuffer *buf,
     new_capacity = buf->data_used + needed + DEFAULT_BUFFER_SIZE;
   }
 
-  uint8_t *new_data = realloc(buf->data, new_capacity);
+  uint8_t *new_data = (uint8_t *)realloc(buf->data, new_capacity);
   if (!new_data)
     return 0;
 
@@ -404,7 +409,8 @@ static inline int ensure_zerocopy_offset_capacity(ZeroCopyBuffer *buf,
     new_capacity = buf->offset_count + needed_offsets + 1000;
   }
 
-  int32_t *new_offsets = realloc(buf->offsets, new_capacity * sizeof(int32_t));
+  int32_t *new_offsets =
+      (int32_t *)realloc(buf->offsets, new_capacity * sizeof(int32_t));
   if (!new_offsets)
     return 0;
 
@@ -417,17 +423,16 @@ static inline int ensure_zerocopy_offset_capacity(ZeroCopyBuffer *buf,
 // Batch Data Management
 // =============================================================================
 
-static inline int init_batch_data(BatchData *batch,
-                                  int64_t capacity,
-                                  const ColumnDef *schema,
-                                  size_t num_columns) {
+static inline int init_batch_data(BatchData *batch, int64_t capacity,
+                                  const ColumnDef *schema, size_t num_columns) {
   memset(batch, 0, sizeof(BatchData));
   batch->capacity = capacity;
 
   // Allocate column buffers
-  batch->column_buffers = calloc(num_columns, sizeof(void *));
-  batch->null_flags = calloc(num_columns, sizeof(bool *));
-  batch->var_buffers = calloc(num_columns, sizeof(ZeroCopyBuffer));
+  batch->column_buffers = (void **)calloc(num_columns, sizeof(void *));
+  batch->null_flags = (bool **)calloc(num_columns, sizeof(bool *));
+  batch->var_buffers =
+      (ZeroCopyBuffer *)calloc(num_columns, sizeof(ZeroCopyBuffer));
 
   if (!batch->column_buffers || !batch->null_flags || !batch->var_buffers)
     return 0;
@@ -436,8 +441,7 @@ static inline int init_batch_data(BatchData *batch,
   for (size_t i = 0; i < num_columns; i++) {
     if (is_variable_type(schema[i].format)) {
       // Initialize zero-copy buffer for variable-length data
-      if (!init_zerocopy_buffer(&batch->var_buffers[i],
-                                DEFAULT_BUFFER_SIZE,
+      if (!init_zerocopy_buffer(&batch->var_buffers[i], DEFAULT_BUFFER_SIZE,
                                 capacity + 1)) {
         return 0;
       }
@@ -450,7 +454,7 @@ static inline int init_batch_data(BatchData *batch,
     }
 
     if (schema[i].nullable) {
-      batch->null_flags[i] = calloc(capacity, sizeof(bool));
+      batch->null_flags[i] = (bool *)calloc(capacity, sizeof(bool));
       if (!batch->null_flags[i])
         return 0;
     }
@@ -459,8 +463,7 @@ static inline int init_batch_data(BatchData *batch,
   return 1;
 }
 
-static inline void free_batch_data(BatchData *batch,
-                                   const ColumnDef *schema,
+static inline void free_batch_data(BatchData *batch, const ColumnDef *schema,
                                    size_t num_columns) {
   if (!batch)
     return;
@@ -482,8 +485,7 @@ static inline void free_batch_data(BatchData *batch,
   memset(batch, 0, sizeof(BatchData));
 }
 
-static inline void reset_batch_data(BatchData *batch,
-                                    const ColumnDef *schema,
+static inline void reset_batch_data(BatchData *batch, const ColumnDef *schema,
                                     size_t num_columns) {
   batch->row_count = 0;
 
@@ -501,8 +503,7 @@ static inline void reset_batch_data(BatchData *batch,
 // Zero-Copy Data Addition Functions
 // =============================================================================
 
-static inline int add_string_value_zerocopy(BatchData *batch,
-                                            size_t col_idx,
+static inline int add_string_value_zerocopy(BatchData *batch, size_t col_idx,
                                             const char *value) {
   ZeroCopyBuffer *buf = &batch->var_buffers[col_idx];
   size_t len = strlen(value); // No +1 for null terminator in Arrow strings
@@ -524,10 +525,8 @@ static inline int add_string_value_zerocopy(BatchData *batch,
   return 1;
 }
 
-static inline int add_binary_value_zerocopy(BatchData *batch,
-                                            size_t col_idx,
-                                            const void *data,
-                                            size_t size) {
+static inline int add_binary_value_zerocopy(BatchData *batch, size_t col_idx,
+                                            const void *data, size_t size) {
   ZeroCopyBuffer *buf = &batch->var_buffers[col_idx];
 
   // Ensure capacity for data and one more offset
@@ -547,12 +546,10 @@ static inline int add_binary_value_zerocopy(BatchData *batch,
   return 1;
 }
 
-static inline int add_fixed_value(BatchData *batch,
-                                  size_t col_idx,
-                                  const void *value,
-                                  const ColumnDef *schema) {
+static inline int add_fixed_value(BatchData *batch, size_t col_idx,
+                                  const void *value, const ColumnDef *schema) {
   size_t type_size = get_type_size(schema[col_idx].format);
-  char *buffer = (char *) batch->column_buffers[col_idx];
+  char *buffer = (char *)batch->column_buffers[col_idx];
   memcpy(buffer + batch->row_count * type_size, value, type_size);
   return 1;
 }
@@ -568,10 +565,12 @@ static inline void create_arrow_schema(struct ArrowSchema *schema,
   schema->format = strdup("+s");
   schema->name = strdup("");
   schema->n_children = num_columns;
-  schema->children = malloc(num_columns * sizeof(struct ArrowSchema *));
+  schema->children =
+      (struct ArrowSchema **)malloc(num_columns * sizeof(struct ArrowSchema *));
 
   for (size_t i = 0; i < num_columns; i++) {
-    schema->children[i] = malloc(sizeof(struct ArrowSchema));
+    schema->children[i] =
+        (struct ArrowSchema *)malloc(sizeof(struct ArrowSchema));
     memset(schema->children[i], 0, sizeof(struct ArrowSchema));
 
     schema->children[i]->format = strdup(column_defs[i].format);
@@ -589,7 +588,7 @@ static inline uint8_t *create_validity_buffer(const bool *null_flags,
                                               int64_t *null_count) {
   *null_count = 0;
   int64_t bytes = (num_rows + 7) / 8;
-  uint8_t *validity = calloc(bytes, 1);
+  uint8_t *validity = (uint8_t *)calloc(bytes, 1);
   if (!validity)
     return NULL;
 
@@ -608,8 +607,7 @@ static inline uint8_t *create_validity_buffer(const bool *null_flags,
   return validity;
 }
 
-static inline int create_arrow_array_child(BatchData *batch,
-                                           size_t col_idx,
+static inline int create_arrow_array_child(BatchData *batch, size_t col_idx,
                                            struct ArrowArray *child,
                                            const ColumnDef *schema) {
   const ColumnDef *col = &schema[col_idx];
@@ -618,15 +616,14 @@ static inline int create_arrow_array_child(BatchData *batch,
   child->length = batch->row_count;
   child->offset = 0;
   child->n_buffers = is_var ? 3 : 2;
-  child->buffers = calloc(child->n_buffers, sizeof(void *));
+  child->buffers = (const void **)calloc(child->n_buffers, sizeof(void *));
   if (!child->buffers)
     return 0;
 
   // Validity buffer
   int64_t null_count;
   child->buffers[0] = create_validity_buffer(batch->null_flags[col_idx],
-                                             batch->row_count,
-                                             &null_count);
+                                             batch->row_count, &null_count);
   child->null_count = null_count;
 
   if (is_var) {
@@ -634,7 +631,8 @@ static inline int create_arrow_array_child(BatchData *batch,
     ZeroCopyBuffer *buf = &batch->var_buffers[col_idx];
 
     // Use the pre-built offset array directly (zero-copy!)
-    int32_t *offsets = malloc((batch->row_count + 1) * sizeof(int32_t));
+    int32_t *offsets =
+        (int32_t *)malloc((batch->row_count + 1) * sizeof(int32_t));
     if (!offsets)
       return 0;
 
@@ -643,7 +641,7 @@ static inline int create_arrow_array_child(BatchData *batch,
     child->buffers[1] = offsets;
 
     // Use the data buffer directly (zero-copy!)
-    uint8_t *data_buffer = malloc(buf->data_used);
+    uint8_t *data_buffer = (uint8_t *)malloc(buf->data_used);
     if (!data_buffer)
       return 0;
 
@@ -687,8 +685,8 @@ static inline void release_schema(struct ArrowSchema *schema) {
     free(schema->children);
   }
 
-  free((char *) schema->format);
-  free((char *) schema->name);
+  free((char *)schema->format);
+  free((char *)schema->name);
   schema->release = NULL;
 }
 
@@ -710,7 +708,7 @@ static inline void release_array(struct ArrowArray *array) {
 
   if (array->buffers) {
     for (int64_t i = 0; i < array->n_buffers; i++) {
-      free((void *) array->buffers[i]);
+      free((void *)array->buffers[i]);
     }
     free(array->buffers);
   }
@@ -720,7 +718,7 @@ static inline void release_array(struct ArrowArray *array) {
 
 static inline int get_schema(struct ArrowArrayStream *stream,
                              struct ArrowSchema *out_schema) {
-  StreamWriter *writer = (StreamWriter *) stream->private_data;
+  StreamWriter *writer = (StreamWriter *)stream->private_data;
   create_arrow_schema(out_schema, writer->schema, writer->num_columns);
   out_schema->release = release_schema;
   return 0;
@@ -728,7 +726,7 @@ static inline int get_schema(struct ArrowArrayStream *stream,
 
 static inline int get_next(struct ArrowArrayStream *stream,
                            struct ArrowArray *out_array) {
-  StreamWriter *writer = (StreamWriter *) stream->private_data;
+  StreamWriter *writer = (StreamWriter *)stream->private_data;
 
   // Check if stream has already been consumed
   if (writer->stream_consumed) {
@@ -751,21 +749,22 @@ static inline int get_next(struct ArrowArrayStream *stream,
   out_array->length = writer->batch.row_count;
   out_array->n_children = writer->num_columns;
   out_array->n_buffers = 1;
-  out_array->buffers = calloc(1, sizeof(void *));
-  out_array->children =
-      calloc(writer->num_columns, sizeof(struct ArrowArray *));
+  out_array->buffers = (const void **)calloc(1, sizeof(void *));
+  out_array->children = (struct ArrowArray **)calloc(
+      writer->num_columns, sizeof(struct ArrowArray *));
 
   if (!out_array->buffers || !out_array->children)
     return -1;
 
   // Create child arrays
   for (size_t i = 0; i < writer->num_columns; i++) {
-    out_array->children[i] = calloc(1, sizeof(struct ArrowArray));
+    out_array->children[i] =
+        (struct ArrowArray *)calloc(1, sizeof(struct ArrowArray));
     if (!out_array->children[i])
       return -1;
 
-    if (!create_arrow_array_child(
-            &writer->batch, i, out_array->children[i], writer->schema)) {
+    if (!create_arrow_array_child(&writer->batch, i, out_array->children[i],
+                                  writer->schema)) {
       return -1;
     }
     out_array->children[i]->release = release_array;
@@ -804,7 +803,7 @@ static inline StreamWriter *create_writer_with_options(const char *filename,
                                                        const ColumnDef *schema,
                                                        size_t num_columns,
                                                        WriterOptions options) {
-  StreamWriter *writer = calloc(1, sizeof(StreamWriter));
+  StreamWriter *writer = (StreamWriter *)calloc(1, sizeof(StreamWriter));
   if (!writer)
     return NULL;
 
@@ -819,7 +818,7 @@ static inline StreamWriter *create_writer_with_options(const char *filename,
   writer->options = options;
 
   if (!init_batch_data(&writer->batch, batch_size, schema, num_columns)) {
-    free((char *) writer->filename);
+    free((char *)writer->filename);
     free(writer);
     return NULL;
   }
@@ -835,23 +834,21 @@ static inline StreamWriter *create_writer(const char *filename,
                                           const ColumnDef *schema,
                                           size_t num_columns) {
   WriterOptions default_options = create_default_writer_options();
-  return create_writer_with_options(
-      filename, batch_size, schema, num_columns, default_options);
+  return create_writer_with_options(filename, batch_size, schema, num_columns,
+                                    default_options);
 }
 
 /**
  * Create a writer with compression codec
  */
-static inline StreamWriter *create_writer_with_compression(
-    const char *filename,
-    int64_t batch_size,
-    const ColumnDef *schema,
-    size_t num_columns,
-    ParquetCompression compression) {
+static inline StreamWriter *
+create_writer_with_compression(const char *filename, int64_t batch_size,
+                               const ColumnDef *schema, size_t num_columns,
+                               ParquetCompression compression) {
   WriterOptions options = create_default_writer_options();
   options.compression = compression;
-  return create_writer_with_options(
-      filename, batch_size, schema, num_columns, options);
+  return create_writer_with_options(filename, batch_size, schema, num_columns,
+                                    options);
 }
 
 static inline void free_writer(StreamWriter *writer) {
@@ -863,17 +860,15 @@ static inline void free_writer(StreamWriter *writer) {
   }
 
   free_batch_data(&writer->batch, writer->schema, writer->num_columns);
-  free((char *) writer->filename);
+  free((char *)writer->filename);
   free(writer);
 }
 
 // Forward declaration
 static int flush_writer(StreamWriter *writer);
 
-static inline int add_row(StreamWriter *writer,
-                          const void **values,
-                          const bool *nulls,
-                          const size_t *sizes) {
+static inline int add_row(StreamWriter *writer, const void **values,
+                          const bool *nulls, const size_t *sizes) {
   BatchData *batch = &writer->batch;
 
   // Check if adding this row would make the batch full
@@ -903,7 +898,7 @@ static inline int add_row(StreamWriter *writer,
       const char *format = writer->schema[i].format;
 
       if (format[0] == 'u' || format[0] == 'U') {
-        if (!add_string_value_zerocopy(batch, i, (const char *) values[i]))
+        if (!add_string_value_zerocopy(batch, i, (const char *)values[i]))
           return 0;
       } else if (format[0] == 'z' || format[0] == 'Z') {
         if (!add_binary_value_zerocopy(batch, i, values[i], sizes[i]))
@@ -918,7 +913,7 @@ static inline int add_row(StreamWriter *writer,
       size_t element_size = get_type_size(format);
       if (element_size > 0) {
         void *dest =
-            (char *) batch->column_buffers[i] + batch->row_count * element_size;
+            (char *)batch->column_buffers[i] + batch->row_count * element_size;
         memset(dest, 0, element_size);
       }
     }
@@ -933,53 +928,53 @@ static inline int add_row(StreamWriter *writer,
 // =============================================================================
 
 // Convert from enhanced library types to stream backend types
-static inline ParquetStreamCompression to_stream_compression(
-    ParquetCompression compression) {
+static inline ParquetStreamCompression
+to_stream_compression(ParquetCompression compression) {
   switch (compression) {
-    case PARQUET_COMPRESSION_UNCOMPRESSED:
-      return PARQUET_STREAM_COMPRESSION_UNCOMPRESSED;
-    case PARQUET_COMPRESSION_SNAPPY:
-      return PARQUET_STREAM_COMPRESSION_SNAPPY;
-    case PARQUET_COMPRESSION_GZIP:
-      return PARQUET_STREAM_COMPRESSION_GZIP;
-    case PARQUET_COMPRESSION_LZO:
-      return PARQUET_STREAM_COMPRESSION_LZO;
-    case PARQUET_COMPRESSION_BROTLI:
-      return PARQUET_STREAM_COMPRESSION_BROTLI;
-    case PARQUET_COMPRESSION_ZSTD:
-      return PARQUET_STREAM_COMPRESSION_ZSTD;
-    case PARQUET_COMPRESSION_LZ4:
-      return PARQUET_STREAM_COMPRESSION_LZ4;
-    case PARQUET_COMPRESSION_LZ4_RAW:
-      return PARQUET_STREAM_COMPRESSION_LZ4_RAW;
-    default:
-      return PARQUET_STREAM_COMPRESSION_SNAPPY;
+  case PARQUET_COMPRESSION_UNCOMPRESSED:
+    return PARQUET_STREAM_COMPRESSION_UNCOMPRESSED;
+  case PARQUET_COMPRESSION_SNAPPY:
+    return PARQUET_STREAM_COMPRESSION_SNAPPY;
+  case PARQUET_COMPRESSION_GZIP:
+    return PARQUET_STREAM_COMPRESSION_GZIP;
+  case PARQUET_COMPRESSION_LZO:
+    return PARQUET_STREAM_COMPRESSION_LZO;
+  case PARQUET_COMPRESSION_BROTLI:
+    return PARQUET_STREAM_COMPRESSION_BROTLI;
+  case PARQUET_COMPRESSION_ZSTD:
+    return PARQUET_STREAM_COMPRESSION_ZSTD;
+  case PARQUET_COMPRESSION_LZ4:
+    return PARQUET_STREAM_COMPRESSION_LZ4;
+  case PARQUET_COMPRESSION_LZ4_RAW:
+    return PARQUET_STREAM_COMPRESSION_LZ4_RAW;
+  default:
+    return PARQUET_STREAM_COMPRESSION_SNAPPY;
   }
 }
 
-static inline ParquetStreamEncoding to_stream_encoding(
-    ParquetEncoding encoding) {
+static inline ParquetStreamEncoding
+to_stream_encoding(ParquetEncoding encoding) {
   switch (encoding) {
-    case PARQUET_ENCODING_PLAIN:
-      return PARQUET_STREAM_ENCODING_PLAIN;
-    case PARQUET_ENCODING_DICTIONARY:
-      return PARQUET_STREAM_ENCODING_DICTIONARY;
-    case PARQUET_ENCODING_RLE:
-      return PARQUET_STREAM_ENCODING_RLE;
-    case PARQUET_ENCODING_BIT_PACKED:
-      return PARQUET_STREAM_ENCODING_BIT_PACKED;
-    case PARQUET_ENCODING_DELTA_BINARY_PACKED:
-      return PARQUET_STREAM_ENCODING_DELTA_BINARY_PACKED;
-    case PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY:
-      return PARQUET_STREAM_ENCODING_DELTA_LENGTH_BYTE_ARRAY;
-    case PARQUET_ENCODING_DELTA_BYTE_ARRAY:
-      return PARQUET_STREAM_ENCODING_DELTA_BYTE_ARRAY;
-    case PARQUET_ENCODING_RLE_DICTIONARY:
-      return PARQUET_STREAM_ENCODING_RLE_DICTIONARY;
-    case PARQUET_ENCODING_BYTE_STREAM_SPLIT:
-      return PARQUET_STREAM_ENCODING_BYTE_STREAM_SPLIT;
-    default:
-      return PARQUET_STREAM_ENCODING_PLAIN;
+  case PARQUET_ENCODING_PLAIN:
+    return PARQUET_STREAM_ENCODING_PLAIN;
+  case PARQUET_ENCODING_DICTIONARY:
+    return PARQUET_STREAM_ENCODING_DICTIONARY;
+  case PARQUET_ENCODING_RLE:
+    return PARQUET_STREAM_ENCODING_RLE;
+  case PARQUET_ENCODING_BIT_PACKED:
+    return PARQUET_STREAM_ENCODING_BIT_PACKED;
+  case PARQUET_ENCODING_DELTA_BINARY_PACKED:
+    return PARQUET_STREAM_ENCODING_DELTA_BINARY_PACKED;
+  case PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY:
+    return PARQUET_STREAM_ENCODING_DELTA_LENGTH_BYTE_ARRAY;
+  case PARQUET_ENCODING_DELTA_BYTE_ARRAY:
+    return PARQUET_STREAM_ENCODING_DELTA_BYTE_ARRAY;
+  case PARQUET_ENCODING_RLE_DICTIONARY:
+    return PARQUET_STREAM_ENCODING_RLE_DICTIONARY;
+  case PARQUET_ENCODING_BYTE_STREAM_SPLIT:
+    return PARQUET_STREAM_ENCODING_BYTE_STREAM_SPLIT;
+  default:
+    return PARQUET_STREAM_ENCODING_PLAIN;
   }
 }
 
@@ -1032,8 +1027,8 @@ static inline int flush_writer(StreamWriter *writer) {
     // Convert column definitions if available
     ParquetStreamColumnDef *stream_columns = NULL;
     if (writer->schema && writer->num_columns > 0) {
-      stream_columns =
-          malloc(writer->num_columns * sizeof(ParquetStreamColumnDef));
+      stream_columns = (ParquetStreamColumnDef *)malloc(
+          writer->num_columns * sizeof(ParquetStreamColumnDef));
       if (stream_columns) {
         for (size_t i = 0; i < writer->num_columns; i++) {
           stream_columns[i].name = writer->schema[i].name;
@@ -1051,12 +1046,9 @@ static inline int flush_writer(StreamWriter *writer) {
     }
 
     // Initialize writer with enhanced options
-    writer->writer_handle =
-        parquet_stream_writer_init_with_options(&stream,
-                                                writer->filename,
-                                                &stream_options,
-                                                stream_columns,
-                                                writer->num_columns);
+    writer->writer_handle = parquet_stream_writer_init_with_options(
+        &stream, writer->filename, &stream_options, stream_columns,
+        writer->num_columns);
 
     // Clean up temporary column definitions
     free(stream_columns);
@@ -1096,12 +1088,15 @@ static inline int close_writer(StreamWriter *writer) {
   }
 
   if (flush_result && close_result == 0) {
-    printf("Successfully wrote %ld total rows to %s\n",
-           writer->total_rows,
+    printf("Successfully wrote %ld total rows to %s\n", writer->total_rows,
            writer->filename);
   }
 
   return flush_result && close_result == 0;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PARQUET_WRITER_ZEROCOPY_H

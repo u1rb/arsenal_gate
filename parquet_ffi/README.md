@@ -8,6 +8,55 @@ This library provides a C interface to read and write Parquet files using Rust's
 - Configure compression, row groups, and other Parquet settings
 - Read Parquet files with batch-based processing
 - Support for common data types: boolean, int32, int64, float, double, string, etc.
+- **Full C++ compatibility** - All headers work seamlessly in C++ projects
+- **High-performance multi-threaded reading** - 2.19x faster processing with queue-based threading
+
+## Performance
+
+The library includes a high-performance, multi-threaded Parquet reader with significant performance improvements:
+
+- **🚀 2.19x faster** processing for CPU-intensive workloads
+- **📈 17.25M rows/sec** throughput (vs 7.86M synchronous)
+- **⚡ Queue-based threading** with producer-consumer pattern
+- **💾 Low memory overhead** with circular buffer design
+
+See [`THREADING_PERFORMANCE_SUMMARY.md`](THREADING_PERFORMANCE_SUMMARY.md) for detailed benchmarks and analysis.
+
+## C++ Support
+
+The library provides full C++ compatibility while maintaining its C interface. All C headers can be included and used directly in C++ projects.
+
+Key features:
+- Proper `extern "C"` blocks in all headers
+- C++ compatible memory management
+- Easy integration with STL containers
+- RAII-friendly resource management
+- **Templated row structures with compile-time type safety (C++20)**
+
+See [`README_CPP_SUPPORT.md`](README_CPP_SUPPORT.md) for detailed documentation and examples.
+
+### C++ Example
+
+```cpp
+#include "parquet_ffi/parquet_writer_stream.h"
+#include "parquet_ffi/parquet_writer_cpp.hpp"
+
+// Define row structure with compile-time type safety
+using PersonRow = std::tuple<std::string, int32_t, double, bool>;
+//                           name        age      salary  is_active
+
+// Create templated writer with automatic schema generation
+std::vector<std::string> columns = {"name", "age", "salary", "is_active"};
+ParquetWriterCpp<PersonRow> writer("people.parquet", columns);
+
+// Add rows with compile-time type checking
+writer.addRow({"Alice", 30, 75000.0, true});
+writer.addRow({"Bob", 25, 65000.0, true});
+
+// Automatic cleanup and error handling
+writer.flush();
+writer.close();
+```
 
 ## Building
 

@@ -57,6 +57,10 @@
 // Include the Parquet FFI library
 #include <parquet_ffi/parquet_stream.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // =============================================================================
 // Type Definitions and Structures
 // =============================================================================
@@ -131,8 +135,7 @@ static ParquetReader *get_current_reader(PacketStream *stream);
 static inline void swap_entries(HeapEntry *a, HeapEntry *b);
 static void heapify_down(HeapEntry *heap, uint32_t heap_size, uint32_t index);
 static void build_heap(HeapEntry *heap, uint32_t heap_size);
-static int64_t get_reader_key(ParquetReader *pr,
-                              int col_index,
+static int64_t get_reader_key(ParquetReader *pr, int col_index,
                               bool is_int32_key);
 
 // =============================================================================
@@ -149,14 +152,14 @@ static int64_t get_reader_key(ParquetReader *pr,
 static inline void packet_stream_release(PacketStream *stream) {
   if (stream) {
     switch (stream->kind) {
-      case PS_PARQUET_SINGLE:
-        parquet_reader_cleanup(stream->impl.parquet_reader);
-        free(stream->impl.parquet_reader);
-        break;
-      case PS_PARQUET_MERGER:
-        parquet_merger_cleanup(stream->impl.parquet_merger);
-        free(stream->impl.parquet_merger);
-        break;
+    case PS_PARQUET_SINGLE:
+      parquet_reader_cleanup(stream->impl.parquet_reader);
+      free(stream->impl.parquet_reader);
+      break;
+    case PS_PARQUET_MERGER:
+      parquet_merger_cleanup(stream->impl.parquet_merger);
+      free(stream->impl.parquet_merger);
+      break;
     }
     free(stream);
   }
@@ -169,10 +172,20 @@ static inline void packet_stream_release(PacketStream *stream) {
 // Initialize a single Parquet file reader
 static PacketStream *parquet_reader_init_stream(const char *file_path);
 
+// Initialize a single Parquet file reader with custom batch size
+static PacketStream *
+parquet_reader_init_stream_with_batch_size(const char *file_path,
+                                           int batch_size);
+
 // Initialize a merger of multiple Parquet files
 static PacketStream *parquet_merger_init_stream(const char **file_paths,
                                                 uint32_t num_files,
                                                 int key_column_index);
+
+// Initialize a merger of multiple Parquet files with custom batch size
+static PacketStream *parquet_merger_init_stream_with_batch_size(
+    const char **file_paths, uint32_t num_files, int key_column_index,
+    int batch_size);
 
 // Schema access functions
 static const char *packet_stream_get_column_name(PacketStream *stream,
@@ -207,8 +220,7 @@ static uint64_t packet_stream_get_value_uint64(PacketStream *stream,
 
 // Zero-copy data access for variable-length types
 static bool packet_stream_get_string_zerocopy(PacketStream *stream,
-                                              int col_index,
-                                              const char **data,
+                                              int col_index, const char **data,
                                               size_t *length);
 static bool packet_stream_get_binary_zerocopy(PacketStream *stream,
                                               int col_index,
@@ -231,7 +243,7 @@ static ParquetReader *get_current_reader(PacketStream *stream) {
 
 // Initialize a single Parquet file reader
 static PacketStream *parquet_reader_init_stream(const char *file_path) {
-  ParquetReader *pr = (ParquetReader *) malloc(sizeof(ParquetReader));
+  ParquetReader *pr = (ParquetReader *)malloc(sizeof(ParquetReader));
   if (!pr) {
     perror("Failed to allocate ParquetReader");
     return NULL;
@@ -243,8 +255,7 @@ static PacketStream *parquet_reader_init_stream(const char *file_path) {
   // Export the parquet file to the stream
   int ret = export_parquet_file_to_stream(file_path, &pr->arrow_stream);
   if (ret != 0) {
-    fprintf(stderr,
-            "Failed to export parquet file to stream: error code %d\n",
+    fprintf(stderr, "Failed to export parquet file to stream: error code %d\n",
             ret);
     free(pr);
     return NULL;
@@ -255,8 +266,7 @@ static PacketStream *parquet_reader_init_stream(const char *file_path) {
   if (ret != 0) {
     fprintf(stderr, "Failed to get schema: error code %d\n", ret);
     if (pr->arrow_stream.get_last_error) {
-      fprintf(stderr,
-              "Error: %s\n",
+      fprintf(stderr, "Error: %s\n",
               pr->arrow_stream.get_last_error(&pr->arrow_stream));
     }
     pr->arrow_stream.release(&pr->arrow_stream);
@@ -269,8 +279,7 @@ static PacketStream *parquet_reader_init_stream(const char *file_path) {
   if (ret != 0) {
     fprintf(stderr, "Failed to get first batch: error code %d\n", ret);
     if (pr->arrow_stream.get_last_error) {
-      fprintf(stderr,
-              "Error: %s\n",
+      fprintf(stderr, "Error: %s\n",
               pr->arrow_stream.get_last_error(&pr->arrow_stream));
     }
     pr->schema.release(&pr->schema);
@@ -291,7 +300,87 @@ static PacketStream *parquet_reader_init_stream(const char *file_path) {
   pr->total_rows_processed = 0;
 
   // Create the packet stream wrapper
-  PacketStream *stream = (PacketStream *) malloc(sizeof(PacketStream));
+  PacketStream *stream = (PacketStream *)malloc(sizeof(PacketStream));
+  if (!stream) {
+    perror("Failed to allocate PacketStream");
+    if (!pr->stream_ended && pr->current_batch.release) {
+      pr->current_batch.release(&pr->current_batch);
+    }
+    pr->schema.release(&pr->schema);
+    pr->arrow_stream.release(&pr->arrow_stream);
+    free(pr);
+    return NULL;
+  }
+
+  stream->kind = PS_PARQUET_SINGLE;
+  stream->impl.parquet_reader = pr;
+
+  return stream;
+}
+
+// Initialize a single Parquet file reader with custom batch size
+static PacketStream *
+parquet_reader_init_stream_with_batch_size(const char *file_path,
+                                           int batch_size) {
+  ParquetReader *pr = (ParquetReader *)malloc(sizeof(ParquetReader));
+  if (!pr) {
+    perror("Failed to allocate ParquetReader");
+    return NULL;
+  }
+
+  // Initialize all fields
+  memset(pr, 0, sizeof(ParquetReader));
+
+  // Export the parquet file to the stream with custom batch size
+  int ret = export_parquet_file_to_stream_with_batch_size(
+      file_path, &pr->arrow_stream, batch_size);
+  if (ret != 0) {
+    fprintf(stderr, "Failed to export parquet file to stream: error code %d\n",
+            ret);
+    free(pr);
+    return NULL;
+  }
+
+  // Get the schema
+  ret = pr->arrow_stream.get_schema(&pr->arrow_stream, &pr->schema);
+  if (ret != 0) {
+    fprintf(stderr, "Failed to get schema: error code %d\n", ret);
+    if (pr->arrow_stream.get_last_error) {
+      fprintf(stderr, "Error: %s\n",
+              pr->arrow_stream.get_last_error(&pr->arrow_stream));
+    }
+    pr->arrow_stream.release(&pr->arrow_stream);
+    free(pr);
+    return NULL;
+  }
+
+  // Get first batch
+  ret = pr->arrow_stream.get_next(&pr->arrow_stream, &pr->current_batch);
+  if (ret != 0) {
+    fprintf(stderr, "Failed to get first batch: error code %d\n", ret);
+    if (pr->arrow_stream.get_last_error) {
+      fprintf(stderr, "Error: %s\n",
+              pr->arrow_stream.get_last_error(&pr->arrow_stream));
+    }
+    pr->schema.release(&pr->schema);
+    pr->arrow_stream.release(&pr->arrow_stream);
+    free(pr);
+    return NULL;
+  }
+
+  // Check if we got an empty batch (end of stream)
+  if (pr->current_batch.release == NULL) {
+    pr->stream_ended = true;
+  } else {
+    pr->batch_number = 1;
+  }
+
+  // Initialize counters
+  pr->next_row_in_batch = 0;
+  pr->total_rows_processed = 0;
+
+  // Create the packet stream wrapper
+  PacketStream *stream = (PacketStream *)malloc(sizeof(PacketStream));
   if (!stream) {
     perror("Failed to allocate PacketStream");
     if (!pr->stream_ended && pr->current_batch.release) {
@@ -326,8 +415,7 @@ static bool parquet_reader_next(ParquetReader *pr) {
     if (ret != 0) {
       fprintf(stderr, "Failed to get next batch: error code %d\n", ret);
       if (pr->arrow_stream.get_last_error) {
-        fprintf(stderr,
-                "Error: %s\n",
+        fprintf(stderr, "Error: %s\n",
                 pr->arrow_stream.get_last_error(&pr->arrow_stream));
       }
       pr->stream_ended = true;
@@ -376,10 +464,8 @@ static void parquet_reader_cleanup(ParquetReader *pr) {
 // Helper function to check if column index is valid
 static bool validate_column_index(ParquetReader *pr, int col_index) {
   if (col_index < 0 || col_index >= pr->schema.n_children) {
-    fprintf(stderr,
-            "Invalid column index %d (schema has %ld columns)\n",
-            col_index,
-            pr->schema.n_children);
+    fprintf(stderr, "Invalid column index %d (schema has %ld columns)\n",
+            col_index, pr->schema.n_children);
     return false;
   }
   return true;
@@ -465,7 +551,7 @@ static bool packet_stream_is_null(PacketStream *stream, int col_index) {
 
   struct ArrowArray *col_array = pr->current_batch.children[col_index];
   int64_t row_idx = pr->next_row_in_batch - 1;
-  const uint8_t *validity = (const uint8_t *) col_array->buffers[0];
+  const uint8_t *validity = (const uint8_t *)col_array->buffers[0];
   return is_value_null(validity, row_idx);
 }
 
@@ -475,27 +561,25 @@ static bool packet_stream_is_null(PacketStream *stream, int col_index) {
                                                     int col_index) {           \
     ParquetReader *pr = get_current_reader(stream);                            \
     if (!pr || !validate_column_index(pr, col_index)) {                        \
-      return (c_type) 0;                                                       \
+      return (c_type)0;                                                        \
     }                                                                          \
                                                                                \
     struct ArrowArray *col_array = pr->current_batch.children[col_index];      \
     struct ArrowSchema *col_schema = pr->schema.children[col_index];           \
                                                                                \
     if (strcmp(col_schema->format, format_char) != 0) {                        \
-      fprintf(stderr,                                                          \
-              "Column %d is not " #type_name " (format: %s)\n",                \
-              col_index,                                                       \
-              col_schema->format);                                             \
-      return (c_type) 0;                                                       \
+      fprintf(stderr, "Column %d is not " #type_name " (format: %s)\n",        \
+              col_index, col_schema->format);                                  \
+      return (c_type)0;                                                        \
     }                                                                          \
                                                                                \
     int64_t row_idx = pr->next_row_in_batch - 1;                               \
-    const uint8_t *validity = (const uint8_t *) col_array->buffers[0];         \
+    const uint8_t *validity = (const uint8_t *)col_array->buffers[0];          \
     if (is_value_null(validity, row_idx)) {                                    \
-      return (c_type) 0;                                                       \
+      return (c_type)0;                                                        \
     }                                                                          \
                                                                                \
-    const c_type *values = (const c_type *) col_array->buffers[1];             \
+    const c_type *values = (const c_type *)col_array->buffers[1];              \
     return values[row_idx];                                                    \
   }
 
@@ -518,8 +602,7 @@ DEFINE_FIXED_TYPE_GETTER(uint16, uint16_t, "S")
 
 // Get string value with zero-copy (returns pointer directly into Arrow buffer)
 static bool packet_stream_get_string_zerocopy(PacketStream *stream,
-                                              int col_index,
-                                              const char **data,
+                                              int col_index, const char **data,
                                               size_t *length) {
   ParquetReader *pr = get_current_reader(stream);
   if (!pr || !validate_column_index(pr, col_index)) {
@@ -534,9 +617,7 @@ static bool packet_stream_get_string_zerocopy(PacketStream *stream,
   // Check format is string (support both "u" and "U")
   if (strcmp(col_schema->format, "u") != 0 &&
       strcmp(col_schema->format, "U") != 0) {
-    fprintf(stderr,
-            "Column %d is not a string (format: %s)\n",
-            col_index,
+    fprintf(stderr, "Column %d is not a string (format: %s)\n", col_index,
             col_schema->format);
     *data = NULL;
     *length = 0;
@@ -544,7 +625,7 @@ static bool packet_stream_get_string_zerocopy(PacketStream *stream,
   }
 
   int64_t row_idx = pr->next_row_in_batch - 1;
-  const uint8_t *validity = (const uint8_t *) col_array->buffers[0];
+  const uint8_t *validity = (const uint8_t *)col_array->buffers[0];
   if (is_value_null(validity, row_idx)) {
     *data = NULL;
     *length = 0;
@@ -552,15 +633,15 @@ static bool packet_stream_get_string_zerocopy(PacketStream *stream,
   }
 
   // Get the string directly from Arrow buffer (zero-copy)
-  const int32_t *offsets = (const int32_t *) col_array->buffers[1];
-  const uint8_t *buffer_data = (const uint8_t *) col_array->buffers[2];
+  const int32_t *offsets = (const int32_t *)col_array->buffers[1];
+  const uint8_t *buffer_data = (const uint8_t *)col_array->buffers[2];
 
   int32_t offset = offsets[row_idx];
   int32_t string_length = offsets[row_idx + 1] - offset;
 
   // Return pointer directly into Arrow buffer - NO MEMORY ALLOCATION
-  *data = (const char *) (buffer_data + offset);
-  *length = (size_t) string_length;
+  *data = (const char *)(buffer_data + offset);
+  *length = (size_t)string_length;
 
   return true;
 }
@@ -583,9 +664,7 @@ static bool packet_stream_get_binary_zerocopy(PacketStream *stream,
   // Check format is binary (support both "z" and "Z")
   if (strcmp(col_schema->format, "z") != 0 &&
       strcmp(col_schema->format, "Z") != 0) {
-    fprintf(stderr,
-            "Column %d is not binary (format: %s)\n",
-            col_index,
+    fprintf(stderr, "Column %d is not binary (format: %s)\n", col_index,
             col_schema->format);
     *data = NULL;
     *length = 0;
@@ -593,7 +672,7 @@ static bool packet_stream_get_binary_zerocopy(PacketStream *stream,
   }
 
   int64_t row_idx = pr->next_row_in_batch - 1;
-  const uint8_t *validity = (const uint8_t *) col_array->buffers[0];
+  const uint8_t *validity = (const uint8_t *)col_array->buffers[0];
   if (is_value_null(validity, row_idx)) {
     *data = NULL;
     *length = 0;
@@ -601,15 +680,15 @@ static bool packet_stream_get_binary_zerocopy(PacketStream *stream,
   }
 
   // Get the binary data directly from Arrow buffer (zero-copy)
-  const int32_t *offsets = (const int32_t *) col_array->buffers[1];
-  const uint8_t *buffer_data = (const uint8_t *) col_array->buffers[2];
+  const int32_t *offsets = (const int32_t *)col_array->buffers[1];
+  const uint8_t *buffer_data = (const uint8_t *)col_array->buffers[2];
 
   int32_t offset = offsets[row_idx];
   int32_t binary_length = offsets[row_idx + 1] - offset;
 
   // Return pointer directly into Arrow buffer - NO MEMORY ALLOCATION
   *data = buffer_data + offset;
-  *length = (size_t) binary_length;
+  *length = (size_t)binary_length;
 
   return true;
 }
@@ -655,16 +734,15 @@ static void build_heap(HeapEntry *heap, uint32_t heap_size) {
 }
 
 // Get the key value for a reader
-static int64_t get_reader_key(ParquetReader *pr,
-                              int col_index,
+static int64_t get_reader_key(ParquetReader *pr, int col_index,
                               bool is_int32_key) {
   if (is_int32_key) {
     const int32_t *values =
-        (const int32_t *) pr->current_batch.children[col_index]->buffers[1];
-    return (int64_t) values[pr->next_row_in_batch - 1];
+        (const int32_t *)pr->current_batch.children[col_index]->buffers[1];
+    return (int64_t)values[pr->next_row_in_batch - 1];
   } else {
     const int64_t *values =
-        (const int64_t *) pr->current_batch.children[col_index]->buffers[1];
+        (const int64_t *)pr->current_batch.children[col_index]->buffers[1];
     return values[pr->next_row_in_batch - 1];
   }
 }
@@ -683,7 +761,7 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
   }
 
   // Allocate the merger
-  ParquetMerger *pm = (ParquetMerger *) malloc(sizeof(ParquetMerger));
+  ParquetMerger *pm = (ParquetMerger *)malloc(sizeof(ParquetMerger));
   if (!pm) {
     perror("Failed to allocate ParquetMerger");
     return NULL;
@@ -698,7 +776,7 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
   pm->need_advance = false;
 
   // Allocate readers array
-  pm->readers = (ParquetReader **) malloc(sizeof(ParquetReader *) * num_files);
+  pm->readers = (ParquetReader **)malloc(sizeof(ParquetReader *) * num_files);
   if (!pm->readers) {
     perror("Failed to allocate readers array");
     free(pm);
@@ -706,7 +784,7 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
   }
 
   // Allocate heap
-  pm->heap = (HeapEntry *) malloc(sizeof(HeapEntry) * num_files);
+  pm->heap = (HeapEntry *)malloc(sizeof(HeapEntry) * num_files);
   if (!pm->heap) {
     perror("Failed to allocate heap");
     free(pm->readers);
@@ -722,8 +800,7 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
     // Initialize each reader
     PacketStream *stream = parquet_reader_init_stream(file_paths[i]);
     if (!stream) {
-      fprintf(stderr,
-              "Failed to initialize reader for file %s\n",
+      fprintf(stderr, "Failed to initialize reader for file %s\n",
               file_paths[i]);
       // Skip this file and continue
       pm->readers[i] = NULL;
@@ -735,10 +812,8 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
 
     // Validate key column exists and get its type
     if (!validate_column_index(pr, key_column_index)) {
-      fprintf(stderr,
-              "Key column index %d is invalid in file %s\n",
-              key_column_index,
-              file_paths[i]);
+      fprintf(stderr, "Key column index %d is invalid in file %s\n",
+              key_column_index, file_paths[i]);
       packet_stream_release(stream);
       pm->readers[i] = NULL;
       continue;
@@ -750,8 +825,7 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
     if (strcmp(key_format, "i") != 0 && strcmp(key_format, "l") != 0) {
       fprintf(stderr,
               "Key column must be int32 or int64, but got %s in file %s\n",
-              key_format,
-              file_paths[i]);
+              key_format, file_paths[i]);
       packet_stream_release(stream);
       pm->readers[i] = NULL;
       continue;
@@ -768,8 +842,7 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
         fprintf(stderr,
                 "Inconsistent key types: expected %s but got %s in file %s\n",
                 pm->is_int32_key ? "int32" : "int64",
-                is_current_int32 ? "int32" : "int64",
-                file_paths[i]);
+                is_current_int32 ? "int32" : "int64", file_paths[i]);
         packet_stream_release(stream);
         pm->readers[i] = NULL;
         continue;
@@ -816,7 +889,160 @@ static PacketStream *parquet_merger_init_stream(const char **file_paths,
   build_heap(pm->heap, pm->heap_size);
 
   // Create the packet stream wrapper
-  PacketStream *stream = (PacketStream *) malloc(sizeof(PacketStream));
+  PacketStream *stream = (PacketStream *)malloc(sizeof(PacketStream));
+  if (!stream) {
+    perror("Failed to allocate PacketStream for merger");
+    parquet_merger_cleanup(pm);
+    free(pm);
+    return NULL;
+  }
+
+  stream->kind = PS_PARQUET_MERGER;
+  stream->impl.parquet_merger = pm;
+
+  return stream;
+}
+
+// Initialize a merger of multiple Parquet files with custom batch size
+static PacketStream *parquet_merger_init_stream_with_batch_size(
+    const char **file_paths, uint32_t num_files, int key_column_index,
+    int batch_size) {
+  if (num_files == 0 || !file_paths) {
+    fprintf(stderr, "No files provided for merger\n");
+    return NULL;
+  }
+
+  // Allocate the merger
+  ParquetMerger *pm = (ParquetMerger *)malloc(sizeof(ParquetMerger));
+  if (!pm) {
+    perror("Failed to allocate ParquetMerger");
+    return NULL;
+  }
+
+  // Initialize base fields
+  pm->K = num_files;
+  pm->key_column_index = key_column_index;
+  pm->heap_size = 0;
+  pm->total_rows_processed = 0;
+  pm->current_reader = NULL;
+  pm->need_advance = false;
+
+  // Allocate readers array
+  pm->readers = (ParquetReader **)malloc(sizeof(ParquetReader *) * num_files);
+  if (!pm->readers) {
+    perror("Failed to allocate readers array");
+    free(pm);
+    return NULL;
+  }
+
+  // Allocate heap
+  pm->heap = (HeapEntry *)malloc(sizeof(HeapEntry) * num_files);
+  if (!pm->heap) {
+    perror("Failed to allocate heap");
+    free(pm->readers);
+    free(pm);
+    return NULL;
+  }
+
+  // Initialize all readers
+  uint32_t active_readers = 0;
+  bool key_type_determined = false;
+
+  for (uint32_t i = 0; i < num_files; i++) {
+    // Initialize each reader with custom batch size
+    PacketStream *stream =
+        parquet_reader_init_stream_with_batch_size(file_paths[i], batch_size);
+    if (!stream) {
+      fprintf(stderr, "Failed to initialize reader for file %s\n",
+              file_paths[i]);
+      // Skip this file and continue
+      pm->readers[i] = NULL;
+      continue;
+    }
+
+    ParquetReader *pr = stream->impl.parquet_reader;
+    pm->readers[i] = pr;
+
+    // Validate key column exists and get its type
+    if (!validate_column_index(pr, key_column_index)) {
+      fprintf(stderr, "Key column index %d is invalid in file %s\n",
+              key_column_index, file_paths[i]);
+      packet_stream_release(stream);
+      pm->readers[i] = NULL;
+      continue;
+    }
+
+    const char *key_format = pr->schema.children[key_column_index]->format;
+
+    // Check key type is compatible (either int32 or int64)
+    if (strcmp(key_format, "i") != 0 && strcmp(key_format, "l") != 0) {
+      fprintf(stderr,
+              "Key column must be int32 or int64, but got %s in file %s\n",
+              key_format, file_paths[i]);
+      packet_stream_release(stream);
+      pm->readers[i] = NULL;
+      continue;
+    }
+
+    // Determine key type if this is the first valid reader
+    if (!key_type_determined) {
+      pm->is_int32_key = (strcmp(key_format, "i") == 0);
+      key_type_determined = true;
+    } else {
+      // Ensure consistent key type across files
+      bool is_current_int32 = (strcmp(key_format, "i") == 0);
+      if (is_current_int32 != pm->is_int32_key) {
+        fprintf(stderr,
+                "Inconsistent key types: expected %s but got %s in file %s\n",
+                pm->is_int32_key ? "int32" : "int64",
+                is_current_int32 ? "int32" : "int64", file_paths[i]);
+        packet_stream_release(stream);
+        pm->readers[i] = NULL;
+        continue;
+      }
+    }
+
+    // Check if reader has data - it should be positioned at the first batch
+    // with next_row_in_batch = 0
+    if (!pr->stream_ended && pr->current_batch.release != NULL) {
+      // The reader is positioned at the first batch with next_row_in_batch = 0,
+      // just like single reader. We need to advance it to position at first row
+      // and read the key for proper heap ordering.
+      if (parquet_reader_next(pr)) {
+        HeapEntry entry;
+        entry.reader_index = i;
+        entry.key = get_reader_key(pr, key_column_index, pm->is_int32_key);
+
+        pm->heap[pm->heap_size++] = entry;
+        active_readers++;
+      }
+    }
+
+    // We've taken ownership of the ParquetReader from the stream
+    // Free only the stream wrapper, not the reader itself
+    free(stream);
+  }
+
+  // Check if we have any active readers
+  if (active_readers == 0) {
+    fprintf(stderr, "No valid readers were initialized\n");
+    for (uint32_t i = 0; i < num_files; i++) {
+      if (pm->readers[i]) {
+        parquet_reader_cleanup(pm->readers[i]);
+        free(pm->readers[i]);
+      }
+    }
+    free(pm->readers);
+    free(pm->heap);
+    free(pm);
+    return NULL;
+  }
+
+  // Build the initial heap
+  build_heap(pm->heap, pm->heap_size);
+
+  // Create the packet stream wrapper
+  PacketStream *stream = (PacketStream *)malloc(sizeof(PacketStream));
   if (!stream) {
     perror("Failed to allocate PacketStream for merger");
     parquet_merger_cleanup(pm);
@@ -846,9 +1072,8 @@ static bool parquet_merger_next(ParquetMerger *pm) {
       // Find the heap entry for this reader
       for (uint32_t i = 0; i < pm->heap_size; i++) {
         if (pm->readers[pm->heap[i].reader_index] == pm->current_reader) {
-          pm->heap[i].key = get_reader_key(pm->current_reader,
-                                           pm->key_column_index,
-                                           pm->is_int32_key);
+          pm->heap[i].key = get_reader_key(
+              pm->current_reader, pm->key_column_index, pm->is_int32_key);
           break;
         }
       }
@@ -908,5 +1133,9 @@ static void parquet_merger_cleanup(ParquetMerger *pm) {
     free(pm->heap);
   }
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // PARQUET_READER_STREAM_H

@@ -4,6 +4,7 @@
 //
 // Provides the minimal FFI interface needed by parquet_reader_stream.h:
 // - export_parquet_file_to_stream: Exports a Parquet file as Arrow stream
+// - export_parquet_file_to_stream_with_batch_size: Same but with custom batch size
 //
 // =============================================================================
 
@@ -11,7 +12,7 @@ use arrow::ffi_stream::FFI_ArrowArrayStream;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::ffi::CStr;
 use std::fs::File;
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_int};
 use crate::tracing_init;
 
 /// Export a Parquet file to an Arrow C stream interface
@@ -43,12 +44,53 @@ pub unsafe extern "C" fn export_parquet_file_to_stream(
     path: *const c_char,
     out_stream: *mut FFI_ArrowArrayStream,
 ) -> i32 {
+    // Use default batch size (8192)
+    export_parquet_file_to_stream_with_batch_size(path, out_stream, 8192)
+}
+
+/// Export a Parquet file to an Arrow C stream interface with custom batch size
+/// 
+/// This function opens a Parquet file and creates an Arrow stream with a specified
+/// batch size that can be consumed by the C header-only library.
+///
+/// # Arguments
+/// * `path` - Path to the Parquet file (null-terminated C string)
+/// * `out_stream` - Pointer to `ArrowArrayStream` to populate
+/// * `batch_size` - Number of rows per batch
+///
+/// # Returns
+/// * 0 on success
+/// * Non-zero error code on failure
+/// 
+/// # Safety
+/// This function is unsafe because it:
+/// - Dereferences raw pointers (`path`, `out_stream`)
+/// - Assumes `path` points to a valid null-terminated C string
+/// - Writes to the memory location pointed to by `out_stream`
+/// - Creates an Arrow stream that must be properly released by the caller
+/// 
+/// The caller must ensure:
+/// - `path` is a valid pointer to a null-terminated UTF-8 string
+/// - `out_stream` points to valid memory that can hold an `FFI_ArrowArrayStream`
+/// - `batch_size` is a positive number
+/// - The resulting stream is properly released using Arrow's release mechanism
+#[no_mangle]
+pub unsafe extern "C" fn export_parquet_file_to_stream_with_batch_size(
+    path: *const c_char,
+    out_stream: *mut FFI_ArrowArrayStream,
+    batch_size: c_int,
+) -> i32 {
     // Initialize tracing for debugging (safe to call multiple times)
     tracing_init::init();
     
     if path.is_null() || out_stream.is_null() {
         eprintln!("Error: Null pointer passed to export_parquet_file_to_stream");
         return -1;
+    }
+
+    if batch_size <= 0 {
+        eprintln!("Error: Invalid batch size: {batch_size}");
+        return -6;
     }
 
     // Convert C string to Rust string
@@ -77,6 +119,9 @@ pub unsafe extern "C" fn export_parquet_file_to_stream(
             return -4;
         }
     };
+
+    // Set the batch size
+    let builder = builder.with_batch_size(batch_size as usize);
 
     // Build the record batch reader
     let reader = match builder.build() {
