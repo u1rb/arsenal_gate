@@ -160,7 +160,7 @@ public:
 
     // Create writer with custom options
     WriterOptions options = create_default_writer_options();
-    options.compression = PARQUET_COMPRESSION_SNAPPY;
+    options.compression = PARQUET_STREAM_COMPRESSION_SNAPPY;
     options.enable_dictionary = true;
     options.enable_statistics = true;
 

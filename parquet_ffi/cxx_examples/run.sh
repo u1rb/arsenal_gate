@@ -11,32 +11,34 @@ for arg in "$@"; do
             FOUND_CELL_ARG=true
             ;;
         help|--help|-h)
-            echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading]"
+            echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading|test_write]"
             echo ""
             echo "Available cells:"
             echo "  build      - Build all examples"
+            echo "  format     - Format C/C++ code"
             echo "  write      - Create test Parquet files"
-            echo "  read       - Test both synchronous and threaded reading"
-            echo "  threading  - Dedicated threading performance tests"
+            echo "  read       - Test reading capabilities"
             echo "  cpp_writer - Test C++ writer examples"
-            echo "  format     - Format C/C++ code with clang-format"
+            echo "  threading  - Test threading performance"
+            echo "  test_write - Run Python unit tests for write functionality (CSV round-trip)"
             echo "  clean      - Clean build artifacts"
             echo ""
             echo "Examples:"
             echo "  $0 --cell=build,write,read          # Standard test sequence"
             echo "  $0 --cell=build,write,threading     # Focus on threading performance"
             echo "  $0 --cell=format,build,write,read   # Format code and test"
+            echo "  $0 --cell=build,test_write          # Build and run Python round-trip tests"
             ;;
         *)
             echo "Error: Unknown argument '$arg'"
-            echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading]"
+            echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading|test_write]"
             ;;
     esac
 done
 
 if [ -z "$CELLS" ]; then
     echo "Error: No cells specified"
-    echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading]"
+    echo "Usage: $0 [--cell=write|read|build|format|clean|cpp_writer|threading|test_write]"
     exit 1
 fi
 
@@ -179,6 +181,42 @@ if has_cell "cpp_writer"; then
     echo "=== Verifying binary_data.parquet ==="
     duckdb -s "SELECT id, description, hex(binary_data), score FROM 'binary_data.parquet' LIMIT 10;"
     duckdb -s "SELECT COUNT(*) FROM 'binary_data.parquet';"
+fi
+
+# =============================================================================
+# Python Unit Tests for Write Functionality
+# =============================================================================
+
+if has_cell "test_write"; then
+    echo "🧪 Running comprehensive CSV-to-Parquet tests with round-trip validation..."
+    echo "This tests:"
+    echo "  - CSV generation and parsing"
+    echo "  - Schema detection and type inference"
+    echo "  - All compression codecs (ZSTD, LZ4, Snappy, Gzip, Brotli)"
+    echo "  - Different batch sizes"
+    echo "  - Edge cases and large files"
+    echo "  - Full round-trip validation (CSV → Parquet → CSV)"
+    echo ""
+    
+    # Check dependencies and files
+    command -v uv >/dev/null || { echo "Error: uv not found. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
+    cd ../cxx_examples
+    [ -f "test_write_stream.py" ] || { echo "Error: test_write_stream.py not found"; exit 1; }
+    [ -f "../build/csv_to_parquet" ] || { echo "Error: csv_to_parquet not built. Run build first."; exit 1; }
+    [ -f "../build/parquet_to_csv" ] || { echo "Error: parquet_to_csv not built. Run build first."; exit 1; }
+    
+    echo "Running comprehensive Python unit tests with CSV round-trip validation..."
+    echo "Tests: CSV generation, schema detection, compression codecs, batch sizes, edge cases"
+    echo "Note: All test artifacts will be created in build/test_artifacts/"
+    echo ""
+    
+    # Run tests from cxx_examples directory, but executables are in build/
+    if uv run --with pyarrow --with pandas test_write_stream.py; then
+        echo "✅ All Python unit tests passed! CSV-to-Parquet conversion working correctly."
+    else
+        echo "❌ Some Python unit tests failed. Check output above."
+        exit 1
+    fi
 fi
 
 echo "Examples completed successfully!" 

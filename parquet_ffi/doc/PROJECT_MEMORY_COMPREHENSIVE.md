@@ -4,6 +4,52 @@
 
 The **parquet_ffi** project is a high-performance Rust-based FFI library that provides zero-copy Parquet file reading and writing capabilities for C/C++ applications. The project has evolved from a monolithic design into a modular, header-only library system with excellent performance characteristics and clean CMake integration.
 
+### Main User Interface
+
+The project's primary entrypoint is the comprehensive test and demonstration runner:
+
+```bash
+bash cxx_examples/run.sh --cell=format,build,write,read,threading
+```
+
+This script provides a complete workflow for:
+- **format**: Code formatting and style validation
+- **build**: Complete project compilation and linking
+- **write**: Parquet file writing demonstrations with various compression options
+- **read**: High-performance reading examples including multi-file merging
+- **threading**: Multi-threaded performance demonstrations
+
+The runner script serves as both the main user interface and comprehensive validation system, making it easy to explore all project capabilities in a single command.
+
+## Quick Start
+
+### Getting Started in 30 Seconds
+
+1. **Clone and run the comprehensive demo**:
+   ```bash
+   git clone <repository-url>
+   cd parquet_ffi
+   bash cxx_examples/run.sh --cell=format,build,write,read,threading
+   ```
+
+2. **What you'll see**:
+   - Complete project build and compilation
+   - Parquet files written with multiple compression codecs
+   - High-performance reading demonstrations (17-22M rows/sec)
+   - Multi-file merging with sorted output
+   - Threading and performance benchmarks
+
+3. **Explore individual components**:
+   ```bash
+   # Just build and test reading
+   bash cxx_examples/run.sh --cell=build,read
+   
+   # Focus on writing capabilities
+   bash cxx_examples/run.sh --cell=build,write
+   ```
+
+The `run.sh` script is your primary interface to explore all project capabilities, from basic functionality to advanced performance features.
+
 ## Architecture
 
 ### Core Components
@@ -234,12 +280,43 @@ writer.addRow({"Alice", 30, 75000.0, true});  // Compile-time type safety
 
 ## Testing and Validation
 
-### Build Verification
+### Primary Interface: Comprehensive Runner Script
+
+The project's main user interface is the integrated test and demonstration runner:
+
 ```bash
-bash cxx_examples/run.sh --cell=build,write,read
+bash cxx_examples/run.sh --cell=format,build,write,read,threading
 ```
 
-### Performance Testing
+#### Available Cell Options
+
+- **format**: Applies code formatting and validates style consistency
+- **build**: Compiles the entire project including all examples and dependencies
+- **write**: Demonstrates Parquet file writing with various compression codecs (ZSTD, LZ4, Snappy, Gzip, Brotli)
+- **read**: Shows high-performance reading capabilities including single-file and multi-file merging
+- **threading**: Runs multi-threaded performance benchmarks and demonstrations
+
+#### Usage Patterns
+
+```bash
+# Run complete workflow (recommended for first-time users)
+bash cxx_examples/run.sh --cell=format,build,write,read,threading
+
+# Run specific components
+bash cxx_examples/run.sh --cell=build,read        # Build and test reading only
+bash cxx_examples/run.sh --cell=write,threading   # Test writing and threading
+bash cxx_examples/run.sh --cell=build             # Build verification only
+```
+
+The runner script automatically:
+- Sets up the build environment
+- Compiles all examples and dependencies
+- Generates test data with various schemas and compression options
+- Runs performance benchmarks
+- Validates functionality across all supported data types
+- Demonstrates advanced features like multi-file merging
+
+### Performance Testing Results
 - **Single file reading**: 19.3M rows/sec, 2.37 GB/s
 - **Multi-file merging**: 22.3M rows/sec, 2.73 GB/s
 - **Writer performance**: 115.59 MB/s with compression
@@ -283,15 +360,15 @@ int main() {
 int main() {
     static const ColumnDef SCHEMA[] = {
         {.name = "id", .format = "i", .nullable = false,
-         .encoding = PARQUET_ENCODING_DELTA_BINARY_PACKED,
-         .enable_statistics = true},
+         .encoding = PARQUET_STREAM_ENCODING_DELTA_BINARY_PACKED,
+         .compression = PARQUET_STREAM_COMPRESSION_UNCOMPRESSED, .use_dictionary = false},
         {.name = "name", .format = "u", .nullable = false,
-         .encoding = PARQUET_ENCODING_DICTIONARY},
+         .encoding = PARQUET_STREAM_ENCODING_DICTIONARY},
         {.name = "value", .format = "g", .nullable = true}
     };
     
     WriterOptions options = create_default_writer_options();
-    options.compression = PARQUET_COMPRESSION_ZSTD;
+    options.compression = PARQUET_STREAM_COMPRESSION_ZSTD;
     options.compression_levels.zstd_level = 9;
     options.enable_bloom_filter = true;
     
@@ -388,6 +465,24 @@ pub unsafe extern "C" fn parquet_stream_writer_init_with_options(
 - **pkg-config**: For system library detection
 
 ## Troubleshooting Guide
+
+### Primary Diagnostic Tool
+
+Start troubleshooting with the comprehensive runner script:
+
+```bash
+# Test complete functionality
+bash cxx_examples/run.sh --cell=format,build,write,read,threading
+
+# Isolate build issues
+bash cxx_examples/run.sh --cell=build
+
+# Test specific functionality
+bash cxx_examples/run.sh --cell=write    # Writer issues
+bash cxx_examples/run.sh --cell=read     # Reader issues
+```
+
+The runner script provides detailed output for each step, making it easy to identify where issues occur.
 
 ### Common Build Issues
 1. **Missing Rust toolchain**: Install Rust via rustup

@@ -35,43 +35,18 @@ extern "C" {
 // Compression and Encoding Types
 // =============================================================================
 
-/**
- * Compression codecs supported by Parquet
- */
-typedef enum {
-  PARQUET_COMPRESSION_UNCOMPRESSED = 0,
-  PARQUET_COMPRESSION_SNAPPY = 1,
-  PARQUET_COMPRESSION_GZIP = 2,
-  PARQUET_COMPRESSION_LZO = 3,
-  PARQUET_COMPRESSION_BROTLI = 4,
-  PARQUET_COMPRESSION_ZSTD = 5,
-  PARQUET_COMPRESSION_LZ4 = 6,
-  PARQUET_COMPRESSION_LZ4_RAW = 7
-} ParquetCompression;
-
-/**
- * Encoding types for Parquet columns
- */
-typedef enum {
-  PARQUET_ENCODING_PLAIN = 0,
-  PARQUET_ENCODING_DICTIONARY = 1,
-  PARQUET_ENCODING_RLE = 2,
-  PARQUET_ENCODING_BIT_PACKED = 3,
-  PARQUET_ENCODING_DELTA_BINARY_PACKED = 4,
-  PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY = 5,
-  PARQUET_ENCODING_DELTA_BYTE_ARRAY = 6,
-  PARQUET_ENCODING_RLE_DICTIONARY = 7,
-  PARQUET_ENCODING_BYTE_STREAM_SPLIT = 8
-} ParquetEncoding;
+// Use the stream types directly to avoid duplication
+typedef ParquetStreamCompression ParquetCompression;
+typedef ParquetStreamEncoding ParquetEncoding;
 
 /**
  * Compression levels for codecs that support them
  */
-typedef struct {
-  int32_t gzip_level;   // 1-9, default 6
-  int32_t brotli_level; // 1-11, default 1
-  int32_t zstd_level;   // 1-22, default 3
-} CompressionLevels;
+typedef ParquetStreamCompressionLevels CompressionLevels;
+
+// =============================================================================
+// Writer configuration options
+// =============================================================================
 
 /**
  * Writer configuration options
@@ -89,6 +64,10 @@ typedef struct {
   bool enable_page_index;
   bool enable_column_index;
 } WriterOptions;
+
+// =============================================================================
+// Arrow format types for column definitions
+// =============================================================================
 
 /**
  * Arrow format types for column definitions
@@ -113,9 +92,8 @@ typedef enum {
 } ArrowType;
 
 /**
- * Arrow format string constants for static initialization
- * Use these for static array initialization where constant expressions are
- * required
+ * Arrow format string constants for user convenience
+ * Use these in static initialization of column definitions
  */
 #define ARROW_FORMAT_BOOL "b"
 #define ARROW_FORMAT_INT8 "c"
@@ -132,15 +110,6 @@ typedef enum {
 #define ARROW_FORMAT_LARGE_STRING "U"
 #define ARROW_FORMAT_BINARY "z"
 #define ARROW_FORMAT_LARGE_BINARY "Z"
-
-/**
- * Convert ArrowType enum to format string (for dynamic use)
- */
-static inline const char *arrow_type_to_format(ArrowType type) {
-  static char format[2] = {0, 0};
-  format[0] = (char)type;
-  return format;
-}
 
 // =============================================================================
 // Schema Definition
@@ -200,7 +169,7 @@ typedef struct {
 static inline WriterOptions create_default_writer_options() {
   WriterOptions options;
   memset(&options, 0, sizeof(WriterOptions));
-  options.compression = PARQUET_COMPRESSION_SNAPPY;
+  options.compression = PARQUET_STREAM_COMPRESSION_SNAPPY;
   options.compression_levels.gzip_level = 6;
   options.compression_levels.brotli_level = 1;
   options.compression_levels.zstd_level = 3;
@@ -233,28 +202,29 @@ static inline ColumnDef create_column_def(const char *name, const char *format,
   case 'l': // int64
   case 'I': // uint32
   case 'L': // uint64
-    col.encoding = PARQUET_ENCODING_DELTA_BINARY_PACKED;
+    col.encoding = PARQUET_STREAM_ENCODING_DELTA_BINARY_PACKED;
     break;
   case 'u': // string
   case 'U': // large string
-    col.encoding = PARQUET_ENCODING_DICTIONARY;
+    col.encoding = PARQUET_STREAM_ENCODING_DICTIONARY;
     col.use_dictionary = true;
     break;
   case 'z': // binary
   case 'Z': // large binary
-    col.encoding = PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY;
+    col.encoding = PARQUET_STREAM_ENCODING_DELTA_LENGTH_BYTE_ARRAY;
     break;
   case 'f': // float
   case 'g': // double
-    col.encoding = PARQUET_ENCODING_BYTE_STREAM_SPLIT;
+    col.encoding = PARQUET_STREAM_ENCODING_BYTE_STREAM_SPLIT;
     break;
   default:
-    col.encoding = PARQUET_ENCODING_PLAIN;
+    col.encoding = PARQUET_STREAM_ENCODING_PLAIN;
     break;
   }
 
   col.compression =
-      PARQUET_COMPRESSION_UNCOMPRESSED; // Use global compression by default
+      PARQUET_STREAM_COMPRESSION_UNCOMPRESSED; // Use global compression by
+                                               // default
   col.use_dictionary =
       (format[0] == 'u' || format[0] == 'U'); // Enable for strings
   col.enable_bloom_filter = false;
@@ -271,7 +241,7 @@ static inline ColumnDef create_column_def(const char *name, const char *format,
    .format = format,                                                           \
    .nullable = nullable,                                                       \
    .encoding = _get_default_encoding(format),                                  \
-   .compression = PARQUET_COMPRESSION_UNCOMPRESSED,                            \
+   .compression = PARQUET_STREAM_COMPRESSION_UNCOMPRESSED,                     \
    .use_dictionary = _get_default_dictionary(format),                          \
    .enable_bloom_filter = false,                                               \
    .enable_statistics = true}
@@ -281,7 +251,7 @@ static inline ColumnDef create_column_def(const char *name, const char *format,
    .format = format,                                                           \
    .nullable = nullable,                                                       \
    .encoding = encoding,                                                       \
-   .compression = PARQUET_COMPRESSION_UNCOMPRESSED,                            \
+   .compression = PARQUET_STREAM_COMPRESSION_UNCOMPRESSED,                     \
    .use_dictionary = false,                                                    \
    .enable_bloom_filter = false,                                               \
    .enable_statistics = true}
@@ -290,14 +260,14 @@ static inline ColumnDef create_column_def(const char *name, const char *format,
 #define _get_default_encoding(format)                                          \
   ((format)[0] == 'i' || (format)[0] == 'l' || (format)[0] == 'I' ||           \
            (format)[0] == 'L'                                                  \
-       ? PARQUET_ENCODING_DELTA_BINARY_PACKED                                  \
+       ? PARQUET_STREAM_ENCODING_DELTA_BINARY_PACKED                           \
        : ((format)[0] == 'u' || (format)[0] == 'U'                             \
-              ? PARQUET_ENCODING_DICTIONARY                                    \
+              ? PARQUET_STREAM_ENCODING_DICTIONARY                             \
               : ((format)[0] == 'z' || (format)[0] == 'Z'                      \
-                     ? PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY                \
+                     ? PARQUET_STREAM_ENCODING_DELTA_LENGTH_BYTE_ARRAY         \
                      : ((format)[0] == 'f' || (format)[0] == 'g'               \
-                            ? PARQUET_ENCODING_BYTE_STREAM_SPLIT               \
-                            : PARQUET_ENCODING_PLAIN))))
+                            ? PARQUET_STREAM_ENCODING_BYTE_STREAM_SPLIT        \
+                            : PARQUET_STREAM_ENCODING_PLAIN))))
 
 #define _get_default_dictionary(format)                                        \
   ((format)[0] == 'u' || (format)[0] == 'U')
@@ -883,38 +853,63 @@ static inline int add_row(StreamWriter *writer, const void **values,
 
   // Add values to columns
   for (size_t i = 0; i < writer->num_columns; i++) {
-    bool is_null = writer->schema[i].nullable && nulls[i];
-
-    // Set null flag
-    if (writer->schema[i].nullable) {
-      batch->null_flags[i][batch->row_count] = is_null;
-    } else if (is_null) {
+    // Validate NULL handling first
+    if (nulls && nulls[i] && !writer->schema[i].nullable) {
       fprintf(stderr, "Cannot add NULL to non-nullable column %zu\n", i);
       return 0;
     }
 
-    // Add data if not null
-    if (!is_null) {
-      const char *format = writer->schema[i].format;
+    bool is_null = nulls && nulls[i] && writer->schema[i].nullable;
 
-      if (format[0] == 'u' || format[0] == 'U') {
+    // Set null flag
+    if (writer->schema[i].nullable) {
+      batch->null_flags[i][batch->row_count] = is_null;
+    }
+
+    // Add data based on type
+    const char *format = writer->schema[i].format;
+
+    if (format[0] == 'u' || format[0] == 'U') {
+      // String columns: always need offset entry, even for NULLs
+      if (!is_null) {
         if (!add_string_value_zerocopy(batch, i, (const char *)values[i]))
           return 0;
-      } else if (format[0] == 'z' || format[0] == 'Z') {
+      } else {
+        // For NULL strings, add an offset entry with no data
+        ZeroCopyBuffer *buf = &batch->var_buffers[i];
+        if (!ensure_zerocopy_offset_capacity(buf, 1))
+          return 0;
+        buf->offsets[buf->offset_count] =
+            buf->data_used; // Same as previous offset
+        buf->offset_count++;
+      }
+    } else if (format[0] == 'z' || format[0] == 'Z') {
+      // Binary columns: always need offset entry, even for NULLs
+      if (!is_null) {
         if (!add_binary_value_zerocopy(batch, i, values[i], sizes[i]))
           return 0;
       } else {
-        if (!add_fixed_value(batch, i, values[i], writer->schema))
+        // For NULL binary, add an offset entry with no data
+        ZeroCopyBuffer *buf = &batch->var_buffers[i];
+        if (!ensure_zerocopy_offset_capacity(buf, 1))
           return 0;
+        buf->offsets[buf->offset_count] =
+            buf->data_used; // Same as previous offset
+        buf->offset_count++;
       }
     } else {
-      // Clear the slot for null values
-      const char *format = writer->schema[i].format;
-      size_t element_size = get_type_size(format);
-      if (element_size > 0) {
-        void *dest =
-            (char *)batch->column_buffers[i] + batch->row_count * element_size;
-        memset(dest, 0, element_size);
+      // Fixed-length columns
+      if (!is_null) {
+        if (!add_fixed_value(batch, i, values[i], writer->schema))
+          return 0;
+      } else {
+        // Clear the slot for null values
+        size_t element_size = get_type_size(format);
+        if (element_size > 0) {
+          void *dest = (char *)batch->column_buffers[i] +
+                       batch->row_count * element_size;
+          memset(dest, 0, element_size);
+        }
       }
     }
   }
@@ -926,57 +921,6 @@ static inline int add_row(StreamWriter *writer, const void **values,
 // =============================================================================
 // Backend Integration Functions
 // =============================================================================
-
-// Convert from enhanced library types to stream backend types
-static inline ParquetStreamCompression
-to_stream_compression(ParquetCompression compression) {
-  switch (compression) {
-  case PARQUET_COMPRESSION_UNCOMPRESSED:
-    return PARQUET_STREAM_COMPRESSION_UNCOMPRESSED;
-  case PARQUET_COMPRESSION_SNAPPY:
-    return PARQUET_STREAM_COMPRESSION_SNAPPY;
-  case PARQUET_COMPRESSION_GZIP:
-    return PARQUET_STREAM_COMPRESSION_GZIP;
-  case PARQUET_COMPRESSION_LZO:
-    return PARQUET_STREAM_COMPRESSION_LZO;
-  case PARQUET_COMPRESSION_BROTLI:
-    return PARQUET_STREAM_COMPRESSION_BROTLI;
-  case PARQUET_COMPRESSION_ZSTD:
-    return PARQUET_STREAM_COMPRESSION_ZSTD;
-  case PARQUET_COMPRESSION_LZ4:
-    return PARQUET_STREAM_COMPRESSION_LZ4;
-  case PARQUET_COMPRESSION_LZ4_RAW:
-    return PARQUET_STREAM_COMPRESSION_LZ4_RAW;
-  default:
-    return PARQUET_STREAM_COMPRESSION_SNAPPY;
-  }
-}
-
-static inline ParquetStreamEncoding
-to_stream_encoding(ParquetEncoding encoding) {
-  switch (encoding) {
-  case PARQUET_ENCODING_PLAIN:
-    return PARQUET_STREAM_ENCODING_PLAIN;
-  case PARQUET_ENCODING_DICTIONARY:
-    return PARQUET_STREAM_ENCODING_DICTIONARY;
-  case PARQUET_ENCODING_RLE:
-    return PARQUET_STREAM_ENCODING_RLE;
-  case PARQUET_ENCODING_BIT_PACKED:
-    return PARQUET_STREAM_ENCODING_BIT_PACKED;
-  case PARQUET_ENCODING_DELTA_BINARY_PACKED:
-    return PARQUET_STREAM_ENCODING_DELTA_BINARY_PACKED;
-  case PARQUET_ENCODING_DELTA_LENGTH_BYTE_ARRAY:
-    return PARQUET_STREAM_ENCODING_DELTA_LENGTH_BYTE_ARRAY;
-  case PARQUET_ENCODING_DELTA_BYTE_ARRAY:
-    return PARQUET_STREAM_ENCODING_DELTA_BYTE_ARRAY;
-  case PARQUET_ENCODING_RLE_DICTIONARY:
-    return PARQUET_STREAM_ENCODING_RLE_DICTIONARY;
-  case PARQUET_ENCODING_BYTE_STREAM_SPLIT:
-    return PARQUET_STREAM_ENCODING_BYTE_STREAM_SPLIT;
-  default:
-    return PARQUET_STREAM_ENCODING_PLAIN;
-  }
-}
 
 static inline int flush_writer(StreamWriter *writer) {
   if (writer->batch.row_count == 0)
@@ -1006,8 +950,7 @@ static inline int flush_writer(StreamWriter *writer) {
 
     // Convert enhanced library options to stream backend options
     ParquetStreamWriterOptions stream_options;
-    stream_options.compression =
-        to_stream_compression(writer->options.compression);
+    stream_options.compression = writer->options.compression;
     stream_options.compression_levels.gzip_level =
         writer->options.compression_levels.gzip_level;
     stream_options.compression_levels.brotli_level =
@@ -1032,10 +975,8 @@ static inline int flush_writer(StreamWriter *writer) {
       if (stream_columns) {
         for (size_t i = 0; i < writer->num_columns; i++) {
           stream_columns[i].name = writer->schema[i].name;
-          stream_columns[i].encoding =
-              to_stream_encoding(writer->schema[i].encoding);
-          stream_columns[i].compression =
-              to_stream_compression(writer->schema[i].compression);
+          stream_columns[i].encoding = writer->schema[i].encoding;
+          stream_columns[i].compression = writer->schema[i].compression;
           stream_columns[i].use_dictionary = writer->schema[i].use_dictionary;
           stream_columns[i].enable_bloom_filter =
               writer->schema[i].enable_bloom_filter;

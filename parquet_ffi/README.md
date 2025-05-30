@@ -141,7 +141,7 @@ columns[1].nullable = true;
 // Configure writer
 ParquetWriterOptions options;
 options.row_group_size = 1024;
-options.compression = PARQUET_COMPRESSION_SNAPPY;
+options.compression = PARQUET_STREAM_COMPRESSION_SNAPPY;
 options.enable_dictionary = true;
 options.enable_statistics = true;
 options.enable_bloom_filter = true;
