@@ -1,0 +1,16 @@
+language = "C"
+cpp_compat = true
+include_guard = "FREQ_TIMER_H"
+include_version = true
+includes = []
+sys_includes = ["stdint.h", "stddef.h", "stdbool.h"]
+
+[export]
+include = ["freq_timer_*"]
+
+[parse]
+parse_deps = false
+include = []
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
