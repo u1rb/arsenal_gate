@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notification Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        let notifications = [];
+
+        async function loadNotifications() {
+            try {
+                const response = await fetch('/api/notifications');
+                notifications = await response.json();
+                renderNotifications();
+            } catch (error) {
+                console.error('Error loading notifications:', error);
+            }
+        }
+
+        async function resolveNotification(id) {
+            try {
+                const response = await fetch(`/api/notifications/${id}/resolve`, {
+                    method: 'PUT'
+                });
+                if (response.ok) {
+                    await loadNotifications();
+                }
+            } catch (error) {
+                console.error('Error resolving notification:', error);
+            }
+        }
+
+        function getPriorityColor(priority) {
+            switch (priority) {
+                case 'high': return 'bg-red-100 border-red-500 text-red-800';
+                case 'medium': return 'bg-yellow-100 border-yellow-500 text-yellow-800';
+                case 'low': return 'bg-green-100 border-green-500 text-green-800';
+                default: return 'bg-gray-100 border-gray-500 text-gray-800';
+            }
+        }
+
+        function renderNotifications() {
+            const container = document.getElementById('notifications-container');
+            const unresolvedCount = notifications.filter(n => !n.resolved).length;
+            
+            document.getElementById('notification-count').textContent = unresolvedCount;
+            
+            if (notifications.length === 0) {
+                container.innerHTML = '<div class="text-center text-gray-500 py-8">No notifications yet</div>';
+                return;
+            }
+
+            container.innerHTML = notifications.map(notification => `
+                <div class="border-l-4 p-4 mb-4 rounded-r-lg shadow-sm ${getPriorityColor(notification.priority)} ${notification.resolved ? 'opacity-50' : ''}">
+                    <div class="flex justify-between items-start">
+                        <div class="flex-1">
+                            <div class="flex items-center mb-2">
+                                <h3 class="font-semibold text-lg">${notification.title}</h3>
+                                <span class="ml-2 px-2 py-1 text-xs font-medium rounded-full ${getPriorityColor(notification.priority)}">${notification.priority.toUpperCase()}</span>
+                                ${notification.category ? `<span class="ml-2 px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">${notification.category}</span>` : ''}
+                                ${notification.resolved ? '<span class="ml-2 px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded-full">RESOLVED</span>' : ''}
+                            </div>
+                            <p class="text-gray-700 mb-2">${notification.message}</p>
+                            <p class="text-sm text-gray-500">
+                                Created: ${new Date(notification.created_at).toLocaleString()}
+                                ${notification.resolved_at ? `<br>Resolved: ${new Date(notification.resolved_at).toLocaleString()}` : ''}
+                            </p>
+                        </div>
+                        ${!notification.resolved ? `
+                            <button 
+                                onclick="resolveNotification('${notification.id}')"
+                                class="ml-4 px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+                            >
+                                Resolve
+                            </button>
+                        ` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Auto-refresh every 5 seconds for more responsive updates
+        setInterval(loadNotifications, 5000);
+
+        // Load notifications when page loads
+        document.addEventListener('DOMContentLoaded', loadNotifications);
+
+        // Add visual indicator for auto-refresh
+        let refreshIndicator = null;
+        function showRefreshIndicator() {
+            if (refreshIndicator) return;
+            refreshIndicator = document.createElement('div');
+            refreshIndicator.className = 'fixed top-4 right-4 bg-blue-500 text-white px-3 py-1 rounded-full text-sm';
+            refreshIndicator.textContent = 'Refreshing...';
+            document.body.appendChild(refreshIndicator);
+            setTimeout(() => {
+                if (refreshIndicator) {
+                    document.body.removeChild(refreshIndicator);
+                    refreshIndicator = null;
+                }
+            }, 1000);
+        }
+
+        // Override loadNotifications to show refresh indicator
+        const originalLoadNotifications = loadNotifications;
+        loadNotifications = async function() {
+            showRefreshIndicator();
+            await originalLoadNotifications();
+        };
+    </script>
+</head>
+<body class="bg-gray-50">
+    <div class="container mx-auto px-4 py-8">
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold text-gray-900 mb-2">Notification Dashboard</h1>
+            <p class="text-gray-600">
+                <span id="notification-count">0</span> unresolved notifications
+                <span class="ml-4 text-sm text-green-600">🔄 Auto-refresh: 5s</span>
+                <span class="ml-2 text-sm text-blue-600">🗑️ Auto-delete resolved: 10s</span>
+            </p>
+        </div>
+
+        <div class="mb-6">
+            <button 
+                onclick="loadNotifications()" 
+                class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+            >
+                Refresh
+            </button>
+        </div>
+
+        <div id="notifications-container" class="space-y-4">
+            <div class="text-center text-gray-500 py-8">Loading notifications...</div>
+        </div>
+
+        <div class="mt-12 bg-white p-6 rounded-lg shadow">
+            <h2 class="text-xl font-semibold mb-4">API Usage</h2>
+            <p class="text-gray-700 mb-4">Send notifications using curl:</p>
+            <pre class="bg-gray-100 p-4 rounded text-sm overflow-x-auto"><code>curl -X POST "http://localhost:8000/api/notifications" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "title": "System Alert",
+       "message": "Database backup completed successfully",
+       "priority": "medium",
+       "category": "system"
+     }'</code></pre>
+        </div>
+    </div>
+</body>
+</html>
