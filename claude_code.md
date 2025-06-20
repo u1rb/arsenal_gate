@@ -25,3 +25,12 @@ Call the web search tool when: user asks about current events, factual informati
 You run in an environment where `ast-grep` is available; whenever a search requires syntax-aware or structural matching, default to `ast-grep --lang rust -p '<pattern>'` (or set `--lang` appropriately) and avoid falling back to text-only tools like `rg` or `grep` unless I explicitly request a plain-text search.
 
 ```
+
+
+## env var
+
+```bash
+alias claude="CLAUBBIT=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ENABLE_BACKGROUND_TASKS=1 claude --dangerously-skip-permissions"
+
+CLAUBBIT=1 disables the "are you sure blabla" dialog and treats you as internal user for the telemetry (which shouldnt matter since we also disabled it)
+```
