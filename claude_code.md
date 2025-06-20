@@ -30,7 +30,7 @@ You run in an environment where `ast-grep` is available; whenever a search requi
 ## env var
 
 ```bash
-alias claude="CLAUBBIT=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ENABLE_BACKGROUND_TASKS=1 claude --dangerously-skip-permissions"
+alias claude="CLAUBBIT=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ENABLE_BACKGROUND_TASKS=1 FORCE_AUTO_BACKGROUND_TASKS=1 claude --dangerously-skip-permissions"
 
-CLAUBBIT=1 disables the "are you sure blabla" dialog and treats you as internal user for the telemetry (which shouldnt matter since we also disabled it)
+rg -o "process\.env\.\w+" $(which claude) | sort -u | sed 's/process\.env\.//'
 ```
