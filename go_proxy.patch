@@ -1,0 +1,731 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..e81b7b3
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,33 @@
++# Binaries
++go_proxy_server
++go_proxy
++
++# Go build artifacts
++*.exe
++*.exe~
++*.dll
++*.so
++*.dylib
++
++# Test binary
++*.test
++
++# Output of the go coverage tool
++*.out
++
++# Dependency directories
++vendor/
++
++# Go workspace file
++go.work
++
++# IDE and editor files
++.vscode/
++.idea/
++*.swp
++*.swo
++*~
++
++# OS files
++.DS_Store
++Thumbs.db
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000..7d1ab02
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,28 @@
++.PHONY: all server client clean test
++
++all: server client
++
++server:
++	@echo "Building proxy server..."
++	@go build -o go_proxy_server ./cmd/server
++
++client:
++	@echo "Building proxy client..."
++	@go build -o go_proxy ./cmd/client
++
++clean:
++	@echo "Cleaning build artifacts..."
++	@rm -f go_proxy_server go_proxy
++
++test:
++	@echo "Testing server in background..."
++	@./go_proxy_server &
++	@sleep 2
++	@echo "Testing with curl..."
++	@./go_proxy curl -I https://example.com
++	@pkill go_proxy_server || true
++
++install: all
++	@echo "Installing binaries to /usr/local/bin (requires sudo)..."
++	@sudo cp go_proxy_server /usr/local/bin/
++	@sudo cp go_proxy /usr/local/bin/
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..5f14fbe
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,256 @@
++# Go HTTP Proxy
++
++A simple HTTP/HTTPS proxy server and client wrapper written in Go.
++
++## Features
++
++- HTTP and HTTPS (CONNECT tunneling) support
++- Minimal request logging
++- Command wrapper client for easy proxy usage
++- No admin privileges required for client
++- Configurable port (defaults to 3128)
++- **Automatic Node.js support** - works with apps that ignore proxy env vars
++
++## Building
++
++### Using Make (recommended)
++
++```bash
++make all
++```
++
++This will create two binaries:
++- `go_proxy_server` - the proxy server
++- `go_proxy` - the client wrapper
++
++### Manual build
++
++```bash
++go build -o go_proxy_server ./cmd/server
++go build -o go_proxy ./cmd/client
++```
++
++## Usage
++
++### 1. Start the proxy server
++
++```bash
++./go_proxy_server
++```
++
++The server will start listening on port 3128 and log all requests:
++
++```
++Starting HTTP proxy server on :3128
++[2025-11-03 10:30:45] CONNECT example.com:443
++[2025-11-03 10:30:46] GET example.com
++```
++
++Stop the server with Ctrl+C for graceful shutdown.
++
++### 2. Use the client wrapper
++
++The client wrapper runs commands with HTTP/HTTPS proxy environment variables automatically set:
++
++```bash
++./go_proxy <command> [args...]
++```
++
++#### Examples
++
++Test with curl:
++```bash
++./go_proxy curl https://example.com
++./go_proxy curl -I https://api.github.com
++```
++
++Use with any command that respects proxy environment variables:
++```bash
++./go_proxy wget https://example.com
++./go_proxy git clone https://github.com/user/repo.git
++./go_proxy npm install
++```
++
++Use with the Claude CLI (as mentioned in your example):
++```bash
++./go_proxy claude ...args
++```
++
++### Manual proxy configuration
++
++If you prefer to set environment variables manually instead of using the wrapper:
++
++```bash
++export HTTP_PROXY=http://localhost:3128
++export HTTPS_PROXY=http://localhost:3128
++curl https://example.com
++```
++
++### Node.js Applications
++
++**The client automatically supports Node.js apps that don't honor proxy environment variables!**
++
++The client embeds a proxy injection script that is automatically activated for all Node.js processes via `NODE_OPTIONS`. This means Node.js applications will work seamlessly without any configuration:
++
++```bash
++# Works with npm-installed CLI tools
++./go_proxy eslint myfile.js
++./go_proxy webpack build
++./go_proxy typescript tsc
++
++# Works with npm/npx
++./go_proxy npm install
++./go_proxy npx create-react-app my-app
++
++# Works with node scripts
++./go_proxy node my-script.js
++```
++
++**How it works:**
++1. The client extracts an embedded `proxy-inject.js` to a temp file
++2. Sets `NODE_OPTIONS="-r /tmp/go_proxy_inject.js"` automatically
++3. When Node.js starts, it loads the injection script first
++4. The script monkey-patches `http` and `https` modules to use the proxy
++5. Your app runs normally with all HTTP/HTTPS requests proxied
++
++**No configuration needed!** This works with:
++- ✅ npm-installed binaries (eslint, webpack, etc.)
++- ✅ npx commands
++- ✅ node scripts
++- ✅ Any process that runs Node.js
++
++**Optional: Enhanced compatibility**
++
++For best results with some libraries, install `http-proxy-agent`:
++```bash
++npm install -g http-proxy-agent
++```
++
++This is optional - the proxy will work without it, but some libraries that use custom HTTP clients may benefit from it.
++
++**Debug logging:**
++
++To see proxy injection debug output:
++```bash
++NODE_DEBUG=proxy ./go_proxy node my-script.js
++```
++
++## Configuration
++
++### Server Configuration
++
++**Custom Port:**
++
++The server can listen on a custom port via the `PROXY_PORT` environment variable:
++
++```bash
++PROXY_PORT=8080 ./go_proxy_server
++```
++
++**Default:** Port 3128
++
++### Client Configuration
++
++The client can connect to a proxy on a different host/port:
++
++**Environment Variables:**
++- `PROXY_HOST` - Proxy server hostname/IP (default: localhost)
++- `PROXY_PORT` - Proxy server port (default: 3128)
++
++**Examples:**
++
++Connect to local proxy on custom port:
++```bash
++PROXY_PORT=8080 ./go_proxy curl https://example.com
++```
++
++Connect to remote proxy:
++```bash
++PROXY_HOST=proxy.example.com ./go_proxy curl https://example.com
++```
++
++Connect to remote proxy with custom port:
++```bash
++PROXY_HOST=192.168.1.100 PROXY_PORT=8080 ./go_proxy curl https://example.com
++```
++
++Or set globally:
++```bash
++export PROXY_HOST=proxy.example.com
++export PROXY_PORT=8080
++./go_proxy curl https://example.com
++```
++
++### Proxy Chaining
++
++The server will automatically chain through another proxy if it's run with `HTTP_PROXY` or `HTTPS_PROXY` environment variables set:
++
++```bash
++# Start server that chains through another proxy
++HTTP_PROXY=http://upstream-proxy:3128 ./go_proxy_server
++
++# Client requests go through your proxy, which forwards through the upstream proxy
++./go_proxy curl https://example.com
++```
++
++This creates a proxy chain: `client → go_proxy_server → upstream-proxy → destination`
++
++## Project Structure
++
++```
++.
++├── cmd/
++│   ├── server/
++│   │   └── main.go         # Proxy server implementation
++│   └── client/
++│       ├── main.go         # Client wrapper implementation
++│       └── proxy-inject.js # Node.js proxy injection (embedded in binary)
++├── go.mod                  # Go module file
++├── Makefile                # Build automation
++└── README.md               # This file
++```
++
++## How It Works
++
++### Server
++The server handles two types of requests:
++
++1. **HTTP requests**: Forwards the request to the destination server and returns the response
++2. **HTTPS requests (CONNECT)**: Establishes a TCP tunnel between the client and destination server for end-to-end encryption
++
++### Client
++The client wrapper:
++
++1. Takes a command and its arguments
++2. Sets `HTTP_PROXY` and `HTTPS_PROXY` environment variables (for apps that honor them)
++3. Extracts embedded `proxy-inject.js` and sets `NODE_OPTIONS` (for Node.js apps)
++4. Executes the command with the modified environment
++5. Passes through stdin/stdout/stderr and preserves the exit code
++
++This dual approach ensures compatibility with:
++- Applications that respect standard proxy environment variables (curl, wget, git, etc.)
++- Node.js applications that ignore proxy environment variables
++
++## Limitations
++
++- No authentication support
++- No caching
++- Basic logging only (timestamp, method, host)
++- No filtering or access control
++- Not suitable for production use (educational/development purposes)
++
++## Requirements
++
++- Go 1.21 or later
++- No admin/root privileges needed (uses port 3128 which doesn't require privileges)
++
++## Cleaning Up
++
++Remove built binaries:
++```bash
++make clean
++```
++
++## License
++
++This is a simple educational project. Use freely.
+diff --git a/cmd/client/main.go b/cmd/client/main.go
+new file mode 100644
+index 0000000..e96da17
+--- /dev/null
++++ b/cmd/client/main.go
+@@ -0,0 +1,116 @@
++package main
++
++import (
++	_ "embed"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"syscall"
++)
++
++//go:embed proxy-inject.js
++var proxyInjectJS string
++
++const (
++	defaultHost = "localhost"
++	defaultPort = "3128"
++)
++
++func getProxyURL() string {
++	host := os.Getenv("PROXY_HOST")
++	if host == "" {
++		host = defaultHost
++	}
++
++	port := os.Getenv("PROXY_PORT")
++	if port == "" {
++		port = defaultPort
++	}
++
++	return "http://" + host + ":" + port
++}
++
++// setupNodeProxyInjection extracts the embedded proxy-inject.js to a temp file
++// and returns the path. Returns empty string on error.
++func setupNodeProxyInjection() string {
++	// Create temp file
++	tmpDir := os.TempDir()
++	tmpFile := filepath.Join(tmpDir, "go_proxy_inject.js")
++
++	// Write embedded JS to temp file
++	err := os.WriteFile(tmpFile, []byte(proxyInjectJS), 0644)
++	if err != nil {
++		return ""
++	}
++
++	return tmpFile
++}
++
++func main() {
++	// Check if command is provided
++	if len(os.Args) < 2 {
++		fmt.Fprintf(os.Stderr, "Usage: %s <command> [args...]\n", os.Args[0])
++		fmt.Fprintf(os.Stderr, "Example: %s curl https://example.com\n", os.Args[0])
++		os.Exit(1)
++	}
++
++	// Get the command and arguments
++	cmdName := os.Args[1]
++	cmdArgs := os.Args[2:]
++
++	// Find the command in PATH
++	cmdPath, err := exec.LookPath(cmdName)
++	if err != nil {
++		fmt.Fprintf(os.Stderr, "Error: command '%s' not found: %v\n", cmdName, err)
++		os.Exit(1)
++	}
++
++	// Get proxy URL from environment or use default
++	proxyURL := getProxyURL()
++
++	// Prepare environment with proxy settings
++	env := os.Environ()
++	env = append(env,
++		"HTTP_PROXY="+proxyURL,
++		"HTTPS_PROXY="+proxyURL,
++		"http_proxy="+proxyURL,
++		"https_proxy="+proxyURL,
++	)
++
++	// Setup Node.js proxy injection for apps that don't honor HTTP_PROXY
++	injectPath := setupNodeProxyInjection()
++	if injectPath != "" {
++		// Get existing NODE_OPTIONS if any
++		existingNodeOpts := os.Getenv("NODE_OPTIONS")
++		nodeOpts := "-r " + injectPath
++		if existingNodeOpts != "" {
++			nodeOpts = nodeOpts + " " + strings.TrimSpace(existingNodeOpts)
++		}
++		env = append(env, "NODE_OPTIONS="+nodeOpts)
++	}
++
++	// Create the command
++	cmd := exec.Command(cmdPath, cmdArgs...)
++	cmd.Env = env
++	cmd.Stdin = os.Stdin
++	cmd.Stdout = os.Stdout
++	cmd.Stderr = os.Stderr
++
++	// Execute the command
++	err = cmd.Run()
++	if err != nil {
++		// Handle exit code from the child process
++		if exitError, ok := err.(*exec.ExitError); ok {
++			if status, ok := exitError.Sys().(syscall.WaitStatus); ok {
++				os.Exit(status.ExitStatus())
++			}
++		}
++		fmt.Fprintf(os.Stderr, "Error executing command: %v\n", err)
++		os.Exit(1)
++	}
++
++	// Exit with success
++	os.Exit(0)
++}
+diff --git a/cmd/client/proxy-inject.js b/cmd/client/proxy-inject.js
+new file mode 100644
+index 0000000..e1168f7
+--- /dev/null
++++ b/cmd/client/proxy-inject.js
+@@ -0,0 +1,117 @@
++// proxy-inject.js
++// This script is automatically injected into Node.js processes to force HTTP/HTTPS proxy usage
++// It monkey-patches the http and https modules before the application starts
++
++(function() {
++  const http = require('http');
++  const https = require('https');
++  const url = require('url');
++
++  // Get proxy configuration from environment
++  const proxyHost = process.env.PROXY_HOST || 'localhost';
++  const proxyPort = process.env.PROXY_PORT || '3128';
++  const proxyUrl = `http://${proxyHost}:${proxyPort}`;
++
++  // Check if http-proxy-agent is available (optional dependency)
++  let HttpProxyAgent, HttpsProxyAgent;
++  try {
++    const proxyAgentModule = require('http-proxy-agent');
++    HttpProxyAgent = proxyAgentModule.HttpProxyAgent || proxyAgentModule;
++    HttpsProxyAgent = proxyAgentModule.HttpsProxyAgent || proxyAgentModule;
++  } catch (e) {
++    // http-proxy-agent not available, use basic implementation
++    HttpProxyAgent = null;
++    HttpsProxyAgent = null;
++  }
++
++  // Create proxy agents if available
++  const httpAgent = HttpProxyAgent ? new HttpProxyAgent(proxyUrl) : null;
++  const httpsAgent = HttpsProxyAgent ? new HttpsProxyAgent(proxyUrl) : null;
++
++  // Monkey-patch http.request
++  const originalHttpRequest = http.request;
++  http.request = function(input, options, callback) {
++    // Handle different call signatures
++    if (typeof input === 'string') {
++      input = new url.URL(input);
++    } else if (input instanceof url.URL) {
++      input = input;
++    }
++
++    if (typeof options === 'function') {
++      callback = options;
++      options = input;
++    } else if (options) {
++      options = Object.assign({}, input, options);
++    } else {
++      options = input;
++    }
++
++    // Inject proxy agent if not already set and agent is available
++    if (httpAgent && !options.agent && options.agent !== false) {
++      options.agent = httpAgent;
++    }
++
++    return originalHttpRequest.call(this, options, callback);
++  };
++
++  // Monkey-patch http.get
++  const originalHttpGet = http.get;
++  http.get = function(input, options, callback) {
++    const req = http.request(input, options, callback);
++    req.end();
++    return req;
++  };
++
++  // Monkey-patch https.request
++  const originalHttpsRequest = https.request;
++  https.request = function(input, options, callback) {
++    // Handle different call signatures
++    if (typeof input === 'string') {
++      input = new url.URL(input);
++    } else if (input instanceof url.URL) {
++      input = input;
++    }
++
++    if (typeof options === 'function') {
++      callback = options;
++      options = input;
++    } else if (options) {
++      options = Object.assign({}, input, options);
++    } else {
++      options = input;
++    }
++
++    // Inject proxy agent if not already set and agent is available
++    if (httpsAgent && !options.agent && options.agent !== false) {
++      options.agent = httpsAgent;
++    }
++
++    return originalHttpsRequest.call(this, options, callback);
++  };
++
++  // Monkey-patch https.get
++  const originalHttpsGet = https.get;
++  https.get = function(input, options, callback) {
++    const req = https.request(input, options, callback);
++    req.end();
++    return req;
++  };
++
++  // Set global agents as fallback
++  if (httpAgent) {
++    http.globalAgent = httpAgent;
++  }
++  if (httpsAgent) {
++    https.globalAgent = httpsAgent;
++  }
++
++  // Only log if NODE_DEBUG contains 'proxy'
++  if (process.env.NODE_DEBUG && process.env.NODE_DEBUG.includes('proxy')) {
++    console.error('[go_proxy] Proxy injection active:', proxyUrl);
++    if (!httpAgent && !httpsAgent) {
++      console.error('[go_proxy] Warning: http-proxy-agent not found, proxy may not work with all libraries');
++      console.error('[go_proxy] Install with: npm install http-proxy-agent');
++    }
++  }
++})();
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+new file mode 100644
+index 0000000..c7ae0fd
+--- /dev/null
++++ b/cmd/server/main.go
+@@ -0,0 +1,136 @@
++package main
++
++import (
++	"fmt"
++	"io"
++	"log"
++	"net"
++	"net/http"
++	"os"
++	"os/signal"
++	"syscall"
++	"time"
++)
++
++const (
++	defaultPort = "3128"
++)
++
++func getProxyPort() string {
++	port := os.Getenv("PROXY_PORT")
++	if port == "" {
++		port = defaultPort
++	}
++	return ":" + port
++}
++
++type ProxyHandler struct{}
++
++func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
++	// Log the request
++	log.Printf("[%s] %s %s", time.Now().Format("2006-01-02 15:04:05"), r.Method, r.Host)
++
++	if r.Method == http.MethodConnect {
++		// Handle HTTPS tunneling
++		h.handleConnect(w, r)
++	} else {
++		// Handle regular HTTP requests
++		h.handleHTTP(w, r)
++	}
++}
++
++// handleConnect handles HTTPS CONNECT requests for tunneling
++func (h *ProxyHandler) handleConnect(w http.ResponseWriter, r *http.Request) {
++	// Connect to the destination server
++	destConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
++	if err != nil {
++		http.Error(w, "Failed to connect to destination", http.StatusServiceUnavailable)
++		log.Printf("Error connecting to %s: %v", r.Host, err)
++		return
++	}
++	defer destConn.Close()
++
++	// Hijack the connection
++	hijacker, ok := w.(http.Hijacker)
++	if !ok {
++		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
++		return
++	}
++
++	clientConn, _, err := hijacker.Hijack()
++	if err != nil {
++		http.Error(w, "Failed to hijack connection", http.StatusInternalServerError)
++		log.Printf("Error hijacking connection: %v", err)
++		return
++	}
++	defer clientConn.Close()
++
++	// Send 200 Connection Established response
++	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
++
++	// Start bidirectional copy
++	go io.Copy(destConn, clientConn)
++	io.Copy(clientConn, destConn)
++}
++
++// handleHTTP handles regular HTTP requests
++func (h *ProxyHandler) handleHTTP(w http.ResponseWriter, r *http.Request) {
++	// Create a new request to the destination
++	client := &http.Client{
++		Timeout: 30 * time.Second,
++		CheckRedirect: func(req *http.Request, via []*http.Request) error {
++			return http.ErrUseLastResponse
++		},
++	}
++
++	// Remove hop-by-hop headers
++	r.RequestURI = ""
++
++	// Forward the request
++	resp, err := client.Do(r)
++	if err != nil {
++		http.Error(w, "Failed to forward request", http.StatusBadGateway)
++		log.Printf("Error forwarding request to %s: %v", r.URL, err)
++		return
++	}
++	defer resp.Body.Close()
++
++	// Copy response headers
++	for key, values := range resp.Header {
++		for _, value := range values {
++			w.Header().Add(key, value)
++		}
++	}
++
++	// Set status code
++	w.WriteHeader(resp.StatusCode)
++
++	// Copy response body
++	io.Copy(w, resp.Body)
++}
++
++func main() {
++	proxyPort := getProxyPort()
++
++	handler := &ProxyHandler{}
++	server := &http.Server{
++		Addr:    proxyPort,
++		Handler: handler,
++	}
++
++	// Handle graceful shutdown
++	stop := make(chan os.Signal, 1)
++	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
++
++	go func() {
++		log.Printf("Starting HTTP proxy server on %s", proxyPort)
++		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
++			log.Fatalf("Server failed: %v", err)
++		}
++	}()
++
++	<-stop
++	fmt.Println("\nShutting down server...")
++	server.Close()
++	fmt.Println("Server stopped")
++}
+diff --git a/go.mod b/go.mod
+new file mode 100644
+index 0000000..cfa0fa7
+--- /dev/null
++++ b/go.mod
+@@ -0,0 +1,3 @@
++module go_http_proxy
++
++go 1.21
