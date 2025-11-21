@@ -1,0 +1,156 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+new file mode 100644
+index 0000000..ba49b86
+--- /dev/null
++++ b/CMakeLists.txt
+@@ -0,0 +1,27 @@
++cmake_minimum_required(VERSION 3.24)
++project(fetch_zst_example LANGUAGES CXX)
++
++include(FetchContent)
++include(${CMAKE_SOURCE_DIR}/cmake/depot_fetch.cmake)
++
++# Repo that hosts prepacked dependency archives (git+ssh URL). Each dep can pin its own branch.
++set(DEPOT_REPO git@github.com:iamwrm/bin_dist.git)
++
++# Pinned hashes for each archive (checked in for deterministic builds).
++set(FOO_ARCHIVE_SHA  bddfd08ce48f89a88756b20a82ea69d166c0cfb98c5f6e1f0567e43eae2ab321)
++set(BAR_ARCHIVE_SHA  d068790137ffbfec4a451aabe73da9edbcd624bf6384bada71c6c7123d8337fe)
++set(BAZ_ARCHIVE_SHA  ab4f549d27a2c039fbb1fb7502c7e979a790992c0448c2335c78b0f07b892c3c)
++set(MAGIC_ENUM_SHA   9a0f5042b9892439da8a6f724d4947585e09145fbe065abc9f29fbf8d30a127e)
++
++# FetchContent with a custom download command to unpack archives (tar.zst, tar.gz, zip) sitting in the local repository.
++depot_declare_dep(foo        ${DEPOT_REPO} master foo-1.0.tar.zst       ${FOO_ARCHIVE_SHA})
++depot_declare_dep(bar        ${DEPOT_REPO} dev    bar-1.0.tar.zst       ${BAR_ARCHIVE_SHA})
++depot_declare_dep(baz        ${DEPOT_REPO} main   baz-1.0.tar.zst       ${BAZ_ARCHIVE_SHA})
++depot_declare_dep(magic_enum ${DEPOT_REPO} main   magic_enum-0.9.7.tar.zst ${MAGIC_ENUM_SHA})
++
++FetchContent_MakeAvailable(foo bar baz magic_enum)
++
++add_executable(app main.cpp)
++target_link_libraries(app PRIVATE foo bar baz magic_enum)
++
++target_compile_features(app PRIVATE cxx_std_17)
+diff --git a/cmake/depot_fetch.cmake b/cmake/depot_fetch.cmake
+new file mode 100644
+index 0000000..525a0bd
+--- /dev/null
++++ b/cmake/depot_fetch.cmake
+@@ -0,0 +1,88 @@
++if(DEFINED DEPOT_EXTRACT_ARCHIVE)
++    if(NOT DEFINED DEPOT_EXTRACT_DEST)
++        message(FATAL_ERROR "DEPOT_EXTRACT_DEST must be set")
++    endif()
++    if(NOT EXISTS "${DEPOT_EXTRACT_ARCHIVE}")
++        message(FATAL_ERROR "Archive not found: ${DEPOT_EXTRACT_ARCHIVE}")
++    endif()
++    file(REMOVE_RECURSE "${DEPOT_EXTRACT_DEST}")
++    file(MAKE_DIRECTORY "${DEPOT_EXTRACT_DEST}")
++    execute_process(COMMAND ${CMAKE_COMMAND} -E tar xvf "${DEPOT_EXTRACT_ARCHIVE}"
++                    WORKING_DIRECTORY "${DEPOT_EXTRACT_DEST}"
++                    RESULT_VARIABLE rv ERROR_VARIABLE err)
++    if(rv)
++        message(FATAL_ERROR "Extraction failed: ${err}")
++    endif()
++    return()
++endif()
++
++function(_depot_run msg)
++    execute_process(${ARGN} RESULT_VARIABLE rv ERROR_VARIABLE err)
++    if(rv)
++        message(FATAL_ERROR "${msg}: ${err}")
++    endif()
++endfunction()
++
++function(_depot_sha256 out_var file_path)
++    execute_process(COMMAND sha256sum ${file_path}
++                    RESULT_VARIABLE rv OUTPUT_VARIABLE out ERROR_VARIABLE err)
++    if(rv)
++        message(FATAL_ERROR "sha256sum failed for ${file_path}: ${err}")
++    endif()
++    string(REGEX MATCH "^[0-9a-fA-F]+" hash ${out})
++    set(${out_var} ${hash} PARENT_SCOPE)
++endfunction()
++
++function(_depot_sync repo_url branch depot_dir)
++    find_package(Git REQUIRED)
++    file(MAKE_DIRECTORY ${depot_dir})
++    if(NOT EXISTS ${depot_dir}/.git)
++        _depot_run("clone ${repo_url}" COMMAND ${GIT_EXECUTABLE} clone --branch ${branch} --single-branch ${repo_url} ${depot_dir})
++    else()
++        _depot_run("fetch ${repo_url}"  COMMAND ${GIT_EXECUTABLE} -C ${depot_dir} fetch origin ${branch})
++        _depot_run("reset ${repo_url}"  COMMAND ${GIT_EXECUTABLE} -C ${depot_dir} checkout -B ${branch} origin/${branch})
++    endif()
++endfunction()
++
++function(depot_declare_dep dep repo_url branch archive expected_sha)
++    if("${expected_sha}" STREQUAL "")
++        message(FATAL_ERROR "Expected SHA256 must be provided for ${dep}")
++    endif()
++
++    get_filename_component(_repo_base ${repo_url} NAME_WE)
++    string(REGEX REPLACE "\\.git$" "" _repo_base ${_repo_base})
++    string(REGEX REPLACE "[^A-Za-z0-9_.-]" "_" _branch_s ${branch})
++    set(depot_dir ${CMAKE_BINARY_DIR}/_local_depot/${_repo_base}-${_branch_s})
++    set(archive_path ${depot_dir}/${archive})
++
++    set(valid FALSE)
++    if(EXISTS ${archive_path})
++        _depot_sha256(existing_sha ${archive_path})
++        if(existing_sha STREQUAL expected_sha)
++            set(valid TRUE)
++        endif()
++    endif()
++
++    if(NOT valid)
++        _depot_sync(${repo_url} ${branch} ${depot_dir})
++        if(NOT EXISTS ${archive_path})
++            message(FATAL_ERROR "Archive not found for ${dep}: ${archive_path}")
++        endif()
++        _depot_sha256(existing_sha ${archive_path})
++        if(NOT existing_sha STREQUAL expected_sha)
++            message(FATAL_ERROR "SHA mismatch for ${dep}: expected ${expected_sha}, got ${existing_sha}")
++        endif()
++    endif()
++
++    set(src_dir ${CMAKE_BINARY_DIR}/_deps/${dep}-src)
++    FetchContent_Declare(
++        ${dep}
++        SOURCE_DIR ${src_dir}
++        URL ${archive_path}
++        URL_HASH SHA256=${expected_sha}
++        DOWNLOAD_COMMAND ${CMAKE_COMMAND}
++            -DDEPOT_EXTRACT_ARCHIVE=${archive_path}
++            -DDEPOT_EXTRACT_DEST=${src_dir}
++            -P ${CMAKE_SOURCE_DIR}/cmake/depot_fetch.cmake
++    )
++endfunction()
+diff --git a/main.cpp b/main.cpp
+new file mode 100644
+index 0000000..395ebd6
+--- /dev/null
++++ b/main.cpp
+@@ -0,0 +1,15 @@
++#include <iostream>
++#include "foo.h"
++#include "bar.h"
++#include "baz.h"
++#include <magic_enum/magic_enum.hpp>
++
++enum class Color { Red, Green, Blue };
++
++int main() {
++    std::cout << "2 + 3 = " << add_numbers(2, 3) << "\n";
++    std::cout << "4 * 5 = " << multiply_numbers(4, 5) << "\n";
++    std::cout << "10 - 7 = " << subtract_numbers(10, 7) << "\n";
++    std::cout << "Color name for Color::Green = " << magic_enum::enum_name(Color::Green) << "\n";
++    return 0;
++}
+diff --git a/run.sh b/run.sh
+new file mode 100644
+index 0000000..245bbf2
+--- /dev/null
++++ b/run.sh
+@@ -0,0 +1 @@
++rm -rf build && cmake -S . -B build && cmake --build build && ./build/app 
+\ No newline at end of file
