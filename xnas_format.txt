@@ -1,0 +1,482 @@
+Nasdaq TotalView-ITCH 5.0
+ITCH is the revolutionary Nasdaq outbound protocol
+
+Table of Contents
+
+Overview
+Architecture
+Data Types
+Message Formats
+1.1 System Event Message
+1.2 Stock Related Messages
+    1.2.1 Stock Directory
+    1.2.2 Stock Trading Action
+    1.2.3 Reg SHO Short Sale Price Test Restricted Indicator
+    1.2.4 Market Participant Position
+    1.2.5 Market-Wide Circuit Breaker (MWCB) Messaging
+    1.2.6 Quoting Period Update
+    1.2.7 Limit Up – Limit Down (LULD) Auction Collar
+    1.2.8 Operational Halt
+1.3 Add Order Message
+    1.3.1 Add Order – No MPID Attribution
+    1.3.2 Add Order with MPID Attribution
+1.4 Modify Order Messages
+    1.4.1 Order Executed Message
+    1.4.2 Order Executed With Price Message
+    1.4.3 Order Cancel Message
+    1.4.4 Order Delete Message
+    1.4.5 Order Replace Message
+1.5 Trade Messages
+    1.5.1 Trade Message (Non-Cross)
+    1.5.2 Cross Trade Message
+    1.5.3 Broken Trade / Order Execution Message
+1.6 Net Order Imbalance Indicator (NOII) Message
+1.7 Retail Price Improvement Indicator (RPII)
+1.8 Direct Listing with Capital Raise Price Discovery Message
+
+==============================================================================
+Overview
+==============================================================================
+Nasdaq TotalView-ITCH is a direct data feed product offered by The Nasdaq Stock Market, LLC. This specification covers both the software and hardware (FPGA) versions of the feed.
+
+Nasdaq TotalView-ITCH features the following data elements (in binary number format) for all exchange-listed equities securities traded via the Nasdaq execution system:
+
+* Order level data with attribution: For Nasdaq execution system, Nasdaq will provide its full order depth using the standard ITCH format. TotalView-ITCH uses a series of messages to track the life of a customer order. (TOTALVIEW-ITCH is an outbound market data feed only. As an added feature, the TotalView-ITCH message formats will support Nasdaq market participant attribution. TotalView-ITCH carries order level data for NYSE, NYSE American, NYSE Arca, and BATS listed securities as well as for Nasdaq-listed securities.)
+
+* Trade messages: To ensure that customers have complete information about Nasdaq order flow, TotalView-ITCH supports a trade message to reflect a match of a non-displayable order in the Nasdaq system. TotalView-ITCH also supports a separate trade message to reflect Nasdaq cross transactions.
+
+* Net Order Imbalance Data: In the minutes leading up to the Nasdaq Opening and Closing Crosses as well as the Nasdaq Crosses for IPO or halted/paused securities, Nasdaq disseminates the indicative clearing price and net order imbalance on Nasdaq. Because the calculation includes non-displayable as well as displayable order types, the Net Order Imbalance Indicator (NOII) is the best predictor of the Nasdaq opening and closing prices available to the public.
+
+* Administrative messages, such trading actions and symbol directory messages:
+    - Trading action messages are used to inform market participants when a security is halted/paused or released for trading.
+    - Symbol Directory messages provide basic security data such as the market tier and Financial Status Indicator.
+    - Market participant position message carries the Primary Market Maker status, Market Participant status and Market Maker mode fields used by some firms to comply with market regulations.
+
+* Event controls, such as start of day, end of day and emergency market halt/resume.
+
+==============================================================================
+Architecture
+==============================================================================
+The TotalView-ITCH feed is made up of a series of sequenced messages. Each message is variable in length based on the message type. The messages that make up the TotalView ITCH protocol are typically delivered using a higher level protocol that takes care of sequencing and delivery guarantees.
+
+Nasdaq offers the TotalView ITCH data feed in three protocol options:
+* SoupBinTCP
+* Compressed via SoupBinTCP
+* MoldUDP64
+
+In the market data messages, instruments are identified by a stock locate code – a low lying integer employed with the intent of serving as an array index for rapidly looking up instrument details. The locate codes are dynamically assigned each day, starting with a value of 1, and communicated via the Stock Directory message. An instrument’s locate code will not change intraday; however, there should be no expectation that the assignment will be the same across multiple days. The Stock Locate code appears all messages, and at the same position in all messages to support efficient filtering. A default value of 0 will be applied to messages which are not stock dependent.
+
+FPGA version:
+Nasdaq will broadcast the TotalView-ITCH FPGA feed from the U.S. primary data center facility in Carteret, New Jersey in the MoldUDP64 protocol option only. Given the unshaped network traffic, Nasdaq is requiring firms to have 10 Gb or 40 Gb network connection into the Carteret, NJ data center to obtain the TotalView-ITCH FPGA feed.
+
+As with the software version of the feed, the TotalView-ITCH FPGA feed will be comprised of a series of sequenced order messages. Outside of the fact that the FPGA data delivery is unthrottled or unshaped at the network level, the TotalView-ITCH payload will be the same for both versions of the TotalView-ITCH 5.0 data formats. TotalView-ITCH FPGA product is guaranteed to disseminate payload messages in the same exact order as the software-based version of the TotalView-ITCH feed.
+
+With this messaging sequencing guarantee, TotalView-ITCH FPGA firms will be able to utilize the GLIMPSE service to obtain current state of the book retransmissions. Firms may also use the software version of TotalView-ITCH for fault tolerance or disaster recovery purposes.
+
+==============================================================================
+Data Types
+==============================================================================
+All integer fields are big-endian (network byte order) binary encoded numbers. Unless otherwise noted, they are unsigned.
+All alpha fields are ASCII fields which are left justified and padded on the right with spaces.
+Prices are integer fields, supplied with an associated precision. When converted to a decimal format, prices are in fixed point format, where the precision defines the number of decimal places. For example, a field flagged as Price (4) has an implied 4 decimal places. The maximum value of price (4) in TotalView-ITCH is 200,000.0000 (decimal, 77359400 hex).
+Timestamps are represented as nanoseconds since midnight.
+
+==============================================================================
+Message Formats
+==============================================================================
+The TotalView-ITCH feed is composed of a series of messages that describe orders added to, removed from, and executed on Nasdaq as well as disseminate Cross and Stock Directory information.
+
+1.1 System Event Message
+------------------------------------------------------------------------------
+The system event message type is used to signal a market or data feed handler event. The format is as follows:
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "S"      System Event Message
+Stock Locate       1       2       Integer  Always 0
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Event Code         11      1       Alpha    See System Event Codes below
+
+System Event Codes – Daily:
+"O" - Start of Messages. Outside of time stamp messages, the start of day message is the first message sent in any trading day.
+"S" - Start of System hours. This message indicates that NASDAQ is open and ready to start accepting orders.
+"Q" - Start of Market hours. This message is intended to indicate that Market Hours orders are available for execution.
+"M" - End of Market hours. This message is intended to indicate that Market Hours orders are no longer available for execution.
+"E" - End of System hours. It indicates that Nasdaq is now closed and will not accept any new orders today. It is still possible to receive Broken Trade messages and Order Delete messages after the End of Day.
+"C" - End of Messages. This is always the last message sent in any trading day.
+
+1.2 Stock Related Messages
+------------------------------------------------------------------------------
+
+1.2.1 Stock Directory
+At the start of each trading day, Nasdaq disseminates stock directory messages for all active symbols in the Nasdaq execution system. Market data redistributors should process this message to populate the Financial Status Indicator (required display field) and the Market Category (recommended display field) for Nasdaq listed issues.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "R"      Stock Directory Message
+Stock Locate       1       2       Integer  Locate Code uniquely assigned to the security symbol for the day.
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Time at which the directory message was generated. Refer to Data Types for field processing notes.
+Stock              11      8       Alpha    Denotes the security symbol for the issue in the Nasdaq execution system.
+Market Category    19      1       Alpha    Indicates Listing market or listing market tier for the issue.
+
+Market Category Codes:
+Q - Nasdaq Global Select Market
+G - Nasdaq Global Market
+S - Nasdaq Capital Market
+N - New York Stock Exchange (NYSE)
+A - NYSE American
+P - NYSE Arca
+Z - BATS Z Exchange
+V - Investors’ Exchange, LLC
+<space> - Not available
+
+Financial Status Indicator (Offset 20, Length 1, Alpha):
+For Nasdaq listed issues, this field indicates when a firm is not in compliance with Nasdaq continued listing requirements.
+
+Nasdaq-Listed Instruments:
+D - Deficient
+E - Delinquent
+Q - Bankrupt
+S - Suspended
+G - Deficient and Bankrupt
+H - Deficient and Delinquent
+J - Delinquent and Bankrupt
+K - Deficient, Delinquent and Bankrupt
+C - Creations and/or Redemptions Suspended for Exchange Traded Product
+N - Normal (Default): Issuer Is NOT Deficient, Delinquent, or Bankrupt
+
+Non-Nasdaq-Listed Instruments:
+<space> - Not available. Firms should refer to SIAC feeds for code if needed.
+
+Round Lot Size (Offset 21, Length 4, Integer):
+Denotes the number of shares that represent a round lot for the issue.
+
+Round Lots Only (Offset 25, Length 1, Alpha):
+Indicates if Nasdaq system limits order entry for issue.
+Y - Nasdaq system only accepts round lots
+N - Nasdaq system does not have any order size restrictions for this security. Odd and mixed lot orders are allowed.
+
+Issue Classification (Offset 26, Length 1, Alpha):
+Identifies the security class for the issue as assigned by Nasdaq. See Appendix for allowable values.
+
+Issue Sub-Type (Offset 27, Length 2, Alpha):
+Identifies the security sub-type for the issue as assigned by Nasdaq. See Appendix for allowable values.
+
+Authenticity (Offset 29, Length 1, Alpha):
+Denotes if an issue or quoting participant record is set-up in Nasdaq systems in a live/production, test, or demo state. Please note that firms should only show live issues and quoting participants on public quotation displays.
+P - Live/Production
+T - Test
+
+Short Sale Threshold Indicator (Offset 30, Length 1, Alpha):
+Indicates if a security is subject to mandatory close-out of short sales under SEC Rule 203(b)(3).
+Y - Issue is restricted under SEC Rule 203(b)(3)
+N - Issue is not restricted
+<space> - Threshold Indicator not available
+
+IPO Flag (Offset 31, Length 1, Alpha):
+Indicates if the Nasdaq security is set up for IPO release. This field is intended to help Nasdaq market participant firms comply with FINRA Rule 5131(b).
+Y - Nasdaq listed instrument is set up as a new IPO security
+N - Nasdaq listed instrument is not set up as a new IPO security
+<space> - Not available (Non-Nasdaq-Listed)
+
+LULD Reference Price Tier (Offset 32, Length 1, Alpha):
+Indicates which Limit Up / Limit Down price band calculation parameter is to be used for the instrument. Refer to LULD Rule for details.
+1 - Tier 1 NMS Stocks and select ETPs
+2 - Tier 2 NMS Stocks
+<space> - Not available
+
+ETP Flag (Offset 33, Length 1, Alpha):
+Indicates whether the security is an exchange traded product (ETP).
+Y - Instrument is an ETP
+N - Instrument is not an ETP
+<space> - Not available
+
+ETP Leverage Factor (Offset 34, Length 4, Integer):
+Tracks the integral relationship of the ETP to the underlying index. Example: If the underlying Index increases by a value of 1 and the ETP’s Leverage factor is 3, indicates the ETF will increase/decrease (see Inverse) by 3. Leverage Factor is rounded to the nearest integer below, e.g. leverage factor 1 would represent leverage factors of 1 to 1.99. This field is used for LULD Tier I price band calculation purposes.
+
+Inverse Indicator (Offset 38, Length 1, Alpha):
+Indicates the directional relationship between the ETP and Underlying index.
+Y - ETP is an Inverse ETP
+N - ETP is not an Inverse ETP
+
+1.2.2 Stock Trading Action
+Nasdaq uses this administrative message to indicate the current trading status of a security to the trading community.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "H"      Stock Trading Action Message.
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Stock              11      8       Alpha    Stock symbol, right padded with spaces
+Trading State      19      1       Alpha    Indicates the current trading state for the stock. Allowable values: "H" = Halted across all U.S. equity markets / SROs, "P" = Paused across all U.S. equity markets / SROs (Nasdaq-listed securities only), "Q" = Quotation only period for cross-SRO halt or pause, "T" = Trading on Nasdaq.
+Reserved           20      1       Alpha    Reserved.
+Reason             21      4       Alpha    Trading Action reason.
+
+1.2.3 Reg SHO Short Sale Price Test Restricted Indicator
+In February 2011, the SEC implemented changes to Rule 201 of Regulation SHO. Nasdaq supports a full pre-opening spin of Reg SHO Short Sale Price Test Restricted Indicator messages indicating the Rule 201 status for all active issues.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "Y"      Reg SHO Short Sale Price Test Restricted Indicator
+Locate Code        1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Stock              11      8       Alpha    Stock symbol, right padded with spaces
+Reg SHO Action     19      1       Alpha    Denotes the Reg SHO Short Sale Price Test Restriction status for the issue at the time of the message dissemination. Allowable values: "0" = No price test in place, "1" = Reg SHO Short Sale Price Test Restriction in effect due to an intra-day price drop in security, "2" = Reg SHO Short Sale Price Test Restriction remains in effect.
+
+1.2.4 Market Participant Position
+At the start of each trading day, Nasdaq disseminates a spin of market participant position messages.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "L"      Market Participant Position message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+MPID               11      4       Alpha    Denotes the market participant identifier for which the position message is being generated
+Stock              15      8       Alpha    Stock symbol, right padded with spaces
+Primary Market Maker 23    1       Alpha    Indicates if the market participant firm qualifies as a Primary Market Maker in accordance with Nasdaq marketplace rules ("Y" = primary, "N" = non-primary).
+Market Maker Mode  24      1       Alpha    Indicates the quoting participant’s registration status in relation to SEC Rules 101 and 104 of Regulation M ("N" = normal, "P" = passive, "S" = syndicate, "R" = pre-syndicate, "L" = penalty).
+Market Participant State 25 1      Alpha    Indicates the market participant’s current registration status in the issue ("A" = Active, "E" = Excused/Withdrawn, "W" = Withdrawn, "S" = Suspended, "D" = Deleted).
+
+1.2.5 Market-Wide Circuit Breaker (MWCB) Messaging
+
+1.2.5.1 MWCB Decline Level Message
+Informs data recipients what the daily MWCB breach points are set to for the current trading day.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "V"      Market wide circuit breaker Decline Level Message.
+Stock Locate       1       2       Integer  Always set to 0
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Time at which the MWCB Decline Level message was generated
+Level 1            11      8       Price(8) Denotes the MWCB Level 1 Value.
+Level 2            19      8       Price(8) Denotes the MWCB Level 2 Value.
+Level 3            27      8       Price(8) Denotes the MWCB Level 3 Value.
+
+1.2.5.2 MWCB Status Message
+Informs data recipients when a MWCB has breached one of the established levels.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "W"      Market-Wide Circuit Breaker Status message
+Stock Locate       1       2       Integer  Always set to 0
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Time at which the MWCB Breaker Status message was generated
+Breached Level     11      1       Alpha    Denotes the MWCB Level that was breached ("1" = Level 1, "2" = Level 2, "3" = Level 3).
+
+1.2.6 Quoting Period Update
+Indicates the anticipated IPO quotation release time of a security.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "K"      IPO Quoting Period Update Message
+Stock Locate       1       2       Integer  Always set to 0
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Time at which the IPO Quoting Period Update message was generated
+Stock              11      8       Alpha    Stock symbol, right padded with spaces
+IPO Quotation Release Time 19 4    Integer  Denotes the IPO release time, in seconds since midnight, for quotation to the nearest second. NOTE: If canceled/postponed, IPO Quotation Time will be set to 0.
+IPO Quotation Release Qualifier 23 1 Alpha  "A" = Anticipated Quotation Release Time. "C" = IPO Release Canceled/Postponed.
+IPO Price          24      4       Price(4) Denotes the IPO Price to be used for intraday net change calculations. (If canceled, IPO Price set to 0).
+
+1.2.7 Limit Up – Limit Down (LULD) Auction Collar
+Indicates the auction collar thresholds within which a paused security can reopen following a LULD Trading Pause.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "J"      LULD Auction Collar
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds past midnight
+Stock              11      8       Alpha    Stock symbol, right padded with spaces
+Auction Collar Reference Price 19 4 Price(4) Reference price used to set the Auction Collars
+Upper Auction Collar Price 23  4  Price(4) Indicates the price of the Upper Auction Collar Threshold
+Lower Auction Collar Price 27  4  Price(4) Indicates the price of the Lower Auction Collar Threshold
+Auction Collar Extension   31  4  Integer  Indicates the number of the extensions to the Reopening Auction
+
+1.2.8 Operational Halt
+The Exchange uses this message to indicate the current Operational Status of a security to the trading community.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "h"      Operational Halt
+Stock Locate       1       2       Integer  Locate code uniquely assigned to the security symbol for the day.
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Time at which the Operational Halt message was generated.
+Stock              11      8       Alpha    Denotes the security symbol for the issue in Nasdaq execution system
+Market Code        19      1       Alpha    "Q": Nasdaq, "B": BX, "X": PSX
+Operational Halt Action 20 1       Alpha    "H": Operationally Halted on the identified Market, "T": Operational Halt has been lifted and Trading resumed
+
+1.3 Add Order Message
+An Add Order Message indicates that a new order has been accepted by the Nasdaq system and was added to the displayable book.
+
+1.3.1 Add Order – No MPID Attribution
+This message will be generated for unattributed orders accepted by the Nasdaq system.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "A"      Add Order – No MPID Attribution Message.
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight.
+Order Reference Number 11  8       Integer  The unique reference number assigned to the new order at the time of receipt.
+Buy/Sell Indicator 19      1       Alpha    The type of order being added. "B" = Buy Order. "S" = Sell Order.
+Shares             20      4       Integer  The total number of shares associated with the order being added to the book.
+Stock              24      8       Alpha    Stock symbol, right padded with spaces
+Price              32      4       Price(4) The display price of the new order.
+
+1.3.2 Add Order with MPID Attribution
+This message will be generated for attributed orders and quotations accepted by the Nasdaq system.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "F"      Add Order – MPID Attribution Message.
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight.
+Order Reference Number 11  8       Integer  The unique reference number assigned to the new order at the time of receipt.
+Buy/Sell Indicator 19      1       Alpha    The type of order being added. "B" = buy order. "S" = sell order.
+Shares             20      4       Integer  The total number of shares associated with the order being added to the book
+Stock              24      8       Alpha    Stock symbol, right padded with spaces
+Price              32      4       Price(4) The display price of the new order.
+Attribution        36      4       Alpha    Nasdaq Market participant identifier associated with the entered order
+
+1.4 Modify Order Messages
+
+1.4.1 Order Executed Message
+This message is sent whenever an order on the book is executed in whole or in part.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "E"      Order Executed Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Order Reference Number 11  8       Integer  The unique reference number assigned to the new order at the time of receipt
+Executed Shares    19      4       Integer  The number of shares executed
+Match Number       23      8       Integer  The Nasdaq generated day unique Match Number of this execution. The Match Number is also referenced in the Trade Break Message
+
+1.4.2 Order Executed With Price Message
+This message is sent whenever an order on the book is executed in whole or in part at a price different from the initial display price.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "C"      Order Executed with Price Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Order Reference Number 11  8       Integer  The unique reference number assigned to the new order at the time of receipt
+Executed Shares    19      4       Integer  The number of shares executed
+Match Number       23      8       Integer  The Nasdaq generated day unique Match Number of this execution. The Match Number is also referenced in the Trade Break Message
+Printable          31      1       Alpha    Indicates if the execution should be reflected on time and sales displays and volume calculations ("N" = Non-Printable, "Y" = Printable).
+Execution Price    32      4       Price(4) The Price at which the order execution occurred.
+
+1.4.3 Order Cancel Message
+This message is sent whenever an order on the book is modified as a result of a partial cancellation.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "X"      Order Cancel Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Order Reference Number 11  8       Integer  The reference number of the order being canceled
+Cancelled Shares   19      4       Integer  The number of shares being removed from the display size of the order as a result of a cancellation
+
+1.4.4 Order Delete Message
+This message is sent whenever an order on the book is being cancelled. All remaining shares are no longer accessible.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "D"      Order Delete Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Order Reference Number 11  8       Integer  The reference number of the order being canceled
+
+1.4.5 Order Replace Message
+This message is sent whenever an order on the book has been cancel-replaced.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "U"      Order Replace Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Original Order Reference Number 11 8 Integer The original order reference number of the order being replaced
+New Order Reference Number 19 8    Integer  The new reference number for this order at time of replacement (used for all subsequent updates)
+Shares             27      4       Integer  The new total displayed quantity
+Price              31      4       Price(4) The new display price for the order
+
+1.5 Trade Messages
+
+1.5.1 Trade Message (Non-Cross)
+The Trade Message is designed to provide execution details for normal match events involving non-displayable order types.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "P"      Trade Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight.
+Order Reference Number 11  8       Integer  The unique reference number assigned to the order on the book being executed. (Effective Dec 6, 2010, this field is zero for Trade Non-Cross messages).
+Buy/Sell Indicator 19      1       Alpha    The type of non-display order on the book being matched. Always "B" regardless of resting side (Effective 07/14/2014).
+Shares             20      4       Integer  The number of shares being matched in this execution
+Stock              24      8       Alpha    Stock Symbol, right padded with spaces
+Price              32      4       Price(4) The match price of the order
+Match Number       36      8       Integer  The Nasdaq generated session unique Match Number for this trade (referenced in Trade Break Message).
+
+1.5.2 Cross Trade Message
+Cross Trade message indicates that Nasdaq has completed its cross process for a specific security (Opening, Closing, EMC).
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "Q"      Cross Trade Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight.
+Shares             11      8       Integer  The number of shares matched in the Nasdaq Cross.
+Stock              19      8       Alpha    Stock symbol, right padded with spaces
+Cross Price        27      4       Price(4) The price at which the cross occurred.
+Match Number       31      8       Integer  The Nasdaq generated day-unique Match Number of this execution.
+Cross Type         39      1       Alpha    The Nasdaq cross session for which the message is being generated ("O" = Opening, "C" = Closing, "H" = Cross for IPO/halted/paused).
+
+1.5.3 Broken Trade / Order Execution Message
+The Broken Trade Message is sent whenever an execution on Nasdaq is broken.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "B"      Broken Trade Message.
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight.
+Match Number       11      8       Integer  The Nasdaq Match Number of the execution that was broken.
+
+1.6 Net Order Imbalance Indicator (NOII) Message
+Nasdaq disseminates NOII data at specific intervals for Opening and Closing Crosses, as well as IPO/Halt crosses.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "I"      NOII Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight.
+Paired Shares      11      8       Integer  The total number of shares that are eligible to be matched at the Current Reference Price.
+Imbalance Shares   19      8       Integer  The number of shares not paired at the Current Reference Price.
+Imbalance Direction 27     1       Alpha    The market side of the order imbalance ("B" = buy, "S" = sell, "N" = no imbalance, "O" = Insufficient orders, "P" = Paused).
+Stock              28      8       Alpha    Stock symbol, right padded with spaces
+Far Price          36      4       Price(4) A hypothetical auction-clearing price for cross orders only.
+Near Price         40      4       Price(4) A hypothetical auction-clearing price for cross orders as well as continuous orders.
+Current Reference Price 44 4       Price(4) The price at which the NOII shares are being calculated.
+Cross Type         48      1       Alpha    The type of Nasdaq cross ("O" = Opening, "C" = Closing, "H" = IPO/halted/paused, "A" = Extended Trading Close).
+Price Variation Indicator 49 1     Alpha    Absolute value of percentage deviation of Near Indicative Clearing Price to Current Reference Price ("L" < 1%, "1"-"9" for 1-9.99%, "A" 10-19.99%, "B" 20-29.99%, "C" >= 30%, <Space> Cannot be calculated).
+
+1.7 Retail Price Improvement Indicator (RPII)
+Identifies a retail interest indication of the Bid, Ask or both the Bid and Ask for Nasdaq-listed securities.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "N"      Retail Interest message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight.
+Stock              11      8       Alpha    Stock symbol, right padded with spaces
+Interest Flag      19      1       Alpha    "B" = RPI buy side, "S" = RPI sell side, "A" = RPI both sides, "N" = No RPI orders.
+
+1.8 Direct Listing with Capital Raise Price Discovery Message
+Disseminated only for Direct Listing with Capital Raise (DLCR) securities.
+
+Name               Offset  Length  Value    Notes
+Message Type       0       1       "O"      Direct Listing with Capital Raise Message
+Stock Locate       1       2       Integer  Locate code identifying the security
+Tracking Number    3       2       Integer  Nasdaq internal tracking number
+Timestamp          5       6       Integer  Nanoseconds since midnight
+Stock              11      8       Alpha    Stock symbol, right padded with spaces
+Open Eligibility Status 19 1       Alpha    Indicates if security is eligible to be released for trading ("N" = Not Eligible, "Y" = Eligible).
+Minimum Allowable Price 20 4       Price(4) 20% below Registration Statement Lower Price
+Maximum Allowable Price 24 4       Price(4) 80% above Registration Statement Highest Price
+Near Execution Price    28 4       Price(4) The current reference price when the DLCR volatility test has successfully passed
+Near Execution Time     32 8       Integer  The time at which the near execution price was set
+Lower Price Range Collar 40 4      Price(4) Indicates the price of the Lower Auction Collar Threshold (10% below the Near Execution Price)
+Upper Price Range Collar 44 4      Price(4) Indicates the price of the Upper Auction Collar Threshold (10% above the Near Execution Price)
