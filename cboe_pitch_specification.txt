@@ -2,6 +2,7 @@
 Version: 2.41.62
 Byte Order: Little Endian (all multi-byte fields)
 Protocol Type: UDP Multicast (real-time), TCP (Gap Request Proxy, Spin Server)
+URL: https://cdn.cboe.com/resources/membership/US_EQUITIES_OPTIONS_MULTICAST_PITCH_SPECIFICATION.pdf
 Date: November 18, 2025
 
 --- OVERVIEW ---
