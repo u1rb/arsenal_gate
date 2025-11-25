@@ -1,0 +1,948 @@
+=== FILE FORMAT: Cboe PITCH 2.X Multicast Depth of Book Protocol ===
+Version: 2.41.62
+Byte Order: Little Endian (all multi-byte fields)
+Protocol Type: UDP Multicast (real-time), TCP (Gap Request Proxy, Spin Server)
+Date: November 18, 2025
+
+--- OVERVIEW ---
+Cboe PITCH 2.X is a market data feed protocol for real-time depth of book 
+quotations and execution information. Messages are delivered via UDP multicast
+with TCP fallback for gap recovery and spin requests.
+
+Key characteristics:
+- All binary fields use Little Endian byte ordering
+- Messages are variable length, starting with a length byte
+- Multiple messages can be bundled in a single UDP frame
+- Sequence numbers: 32-bit unsigned, rollover from 4,294,967,295 to 1 (not 0)
+- Sequence 0 indicates un-sequenced messages
+
+--- DATA TYPES ---
+
+Type                | Size    | Description
+--------------------|---------|--------------------------------------------------
+Binary              | varies  | Unsigned integer, Little Endian
+Alphanumeric        | varies  | Left-justified ASCII, space-padded right
+Printable ASCII     | varies  | Left-justified ASCII (0x20-0x7e), space-padded
+Binary Short Price  | 2       | LE u16, 2 implied decimal places (÷100)
+Binary Long Price   | 8       | LE u64, 4 implied decimal places (÷10,000)
+Bit Field           | 1       | Each bit is a boolean flag (bit 0 = LSB)
+Binary Date         | 4       | LE u32, base-10 is YYYYMMDD (e.g., 20231030)
+Multiplier          | 4       | LE u32, 1 implied decimal place (÷10)
+Time Offset         | 4       | LE u32, nanoseconds since last Time message
+
+--- MAGIC NUMBERS / MESSAGE TYPE CODES ---
+
+Gap Request Proxy Messages:
+  0x01 = Login
+  0x02 = Login Response
+  0x03 = Gap Request
+  0x04 = Gap Response
+
+Spin Server Messages:
+  0x01 = Login
+  0x02 = Login Response
+  0x80 = Spin Image Available
+  0x81 = Spin Request
+  0x82 = Spin Response
+  0x83 = Spin Finished
+  0x84 = Instrument Definition Request
+  0x85 = Instrument Definition Response
+  0x86 = Instrument Definition Finished
+
+PITCH 2.X Messages:
+  0xB1 = Time Reference (C1 Options Only)
+  0x20 = Time
+  0x97 = Unit Clear
+  0xBC = Transaction Begin (Options Only)
+  0xBD = Transaction End (Options Only)
+  0x21 = Add Order - Long
+  0x22 = Add Order - Short
+  0x2F = Add Order - Expanded
+  0x23 = Order Executed
+  0x24 = Order Executed at Price/Size
+  0x25 = Reduce Size - Long
+  0x26 = Reduce Size - Short
+  0x27 = Modify Order - Long
+  0x28 = Modify Order - Short
+  0x29 = Delete Order
+  0x2A = Trade - Long
+  0x2B = Trade - Short
+  0x30 = Trade - Expanded
+  0x2C = Trade Break
+  0x2D = End of Session
+  0x2E = Symbol Mapping (Options Only)
+  0x31 = Trading Status
+  0xD2 = Width Update (Options Only)
+  0x95 = Auction Update (BYX/BZX Equities Only)
+  0xD1 = Options Auction Update (Options Only)
+  0x96 = Auction Summary
+  0xAD = Auction Notification (C1/EDGX Options Only)
+  0xAE = Auction Cancel (C1/EDGX Options Only)
+  0xAF = Auction Trade (C1/EDGX Options Only)
+  0x98 = Retail Price Improvement (BYX Only)
+  0x9D = SOQ Strike Range Update (C1 Only)
+  0x9E = Constituent Symbol Mapping (C1 Only)
+
+--- STRUCTURES ---
+
+SequencedUnitHeader (wraps all messages)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 2     | hdr_length   | u16    | LE     | Total length including header + all messages
+  2       | 1     | hdr_count    | u8     | N/A    | Number of messages following header
+  4       | 1     | hdr_unit     | u8     | N/A    | Unit ID for messages in this block
+  4       | 4     | hdr_sequence | u32    | LE     | Sequence of first message (0=unsequenced)
+  Total Length = 8 bytes
+  
+  Notes:
+    - Heartbeat: hdr_count = 0 (no messages follow)
+    - Next sequence = hdr_sequence + hdr_count (handles rollover at 4,294,967,295→1)
+    - Sequence 0 = un-sequenced message
+    - Multiple messages share one header with implied sequential sequence numbers
+
+
+Login (0x01)
+  @offset | @size | field_name    | type         | endian | description
+  --------|-------|---------------|--------------|--------|------------------------------------
+  0       | 1     | length        | u8           | N/A    | Length including this field (22)
+  1       | 1     | message_type  | u8           | N/A    | 0x01
+  2       | 4     | session_sub_id| Alphanumeric | N/A    | Assigned by Cboe
+  6       | 4     | username      | Alphanumeric | N/A    | Assigned by Cboe
+  10      | 2     | filler        | Alphanumeric | N/A    | Space filled
+  12      | 10    | password      | Alphanumeric | N/A    | Assigned by Cboe
+  Total Length = 22 bytes
+
+
+LoginResponse (0x02)
+  @offset | @size | field_name   | type         | endian | description
+  --------|-------|--------------|--------------|--------|------------------------------------
+  0       | 1     | length       | u8           | N/A    | Length including this field (3)
+  1       | 1     | message_type | u8           | N/A    | 0x02
+  2       | 1     | status       | Alphanumeric | N/A    | See LoginStatus enum
+  Total Length = 3 bytes
+
+
+GapRequest (0x03)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (9)
+  1       | 1     | message_type | u8     | N/A    | 0x03
+  2       | 1     | unit         | u8     | N/A    | Unit to request gap for
+  3       | 4     | sequence     | u32    | LE     | First sequence in range (lowest)
+  7       | 2     | count        | u16    | LE     | Number of messages requested
+  Total Length = 9 bytes
+
+
+GapResponse (0x04)
+  @offset | @size | field_name   | type         | endian | description
+  --------|-------|--------------|--------------|--------|------------------------------------
+  0       | 1     | length       | u8           | N/A    | Length including this field (10)
+  1       | 1     | message_type | u8           | N/A    | 0x04
+  2       | 1     | unit         | u8           | N/A    | Unit gap was requested for
+  3       | 4     | sequence     | u32          | LE     | First sequence in request
+  7       | 2     | count        | u16          | LE     | Count of messages requested
+  9       | 1     | status       | Alphanumeric | N/A    | See GapResponseStatus enum
+  Total Length = 10 bytes
+
+
+SpinImageAvailable (0x80)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8     | N/A    | 0x80
+  2       | 4     | sequence     | u32    | LE     | Spin available through this sequence
+  Total Length = 6 bytes
+
+
+SpinRequest (0x81)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8     | N/A    | 0x81
+  2       | 4     | sequence     | u32    | LE     | Sequence from SpinImageAvailable
+  Total Length = 6 bytes
+
+
+SpinResponse (0x82)
+  @offset | @size | field_name   | type         | endian | description
+  --------|-------|--------------|--------------|--------|------------------------------------
+  0       | 1     | length       | u8           | N/A    | Length including this field (11)
+  1       | 1     | message_type | u8           | N/A    | 0x82
+  2       | 4     | sequence     | u32          | LE     | Sequence from SpinImageAvailable
+  6       | 4     | order_count  | u32          | LE     | Number of Add Order messages in spin
+  10      | 1     | status       | Alphanumeric | N/A    | See SpinResponseStatus enum
+  Total Length = 11 bytes
+
+
+SpinFinished (0x83)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8     | N/A    | 0x83
+  2       | 4     | sequence     | u32    | LE     | Sequence from SpinRequest
+  Total Length = 6 bytes
+
+
+InstrumentDefinitionRequest (0x84)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8     | N/A    | 0x84
+  2       | 4     | sequence     | u32    | LE     | Must be 0
+  Total Length = 6 bytes
+
+
+InstrumentDefinitionResponse (0x85)
+  @offset | @size | field_name      | type         | endian | description
+  --------|-------|-----------------|--------------|--------|------------------------------------
+  0       | 1     | length          | u8           | N/A    | Length including this field (11)
+  1       | 1     | message_type    | u8           | N/A    | 0x85
+  2       | 4     | sequence        | u32          | LE     | Always 0
+  6       | 4     | instrument_count| u32          | LE     | Number of Symbol Mapping messages
+  10      | 1     | status          | Alphanumeric | N/A    | See SpinResponseStatus enum
+  Total Length = 11 bytes
+
+
+InstrumentDefinitionFinished (0x86)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (2)
+  1       | 1     | message_type | u8     | N/A    | 0x86
+  Total Length = 2 bytes
+
+
+TimeReference (0xB1) - C1 Options Only
+  @offset | @size | field_name       | type        | endian | description
+  --------|-------|------------------|-------------|--------|------------------------------------
+  0       | 1     | length           | u8          | N/A    | Length including this field (18)
+  1       | 1     | message_type     | u8          | N/A    | 0xB1
+  2       | 4     | midnight_reference| u32        | LE     | Midnight ET as Unix epoch seconds
+  6       | 4     | time             | u32         | LE     | Seconds since midnight ET
+  10      | 4     | time_offset      | u32         | LE     | Nanoseconds since last timestamp
+  14      | 4     | trade_date       | u32         | LE     | Binary Date (YYYYMMDD)
+  Total Length = 18 bytes
+
+
+Time (0x20)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | 6 (Equities) or 10 (C1 Options)
+  1       | 1     | message_type | u8     | N/A    | 0x20
+  2       | 4     | time         | u32    | LE     | Seconds since midnight ET
+  6       | 4     | epoch_time   | u32    | LE     | C1 Options Only: Unix epoch seconds
+  Total Length = 6 bytes (Equities), 10 bytes (C1 Options)
+  
+  Notes:
+    - Time offset fields in other messages are relative to last Time message
+    - C1 Options may cross midnight boundary (GTH trading)
+
+
+UnitClear (0x97)
+  @offset | @size | field_name   | type        | endian | description
+  --------|-------|--------------|-------------|--------|------------------------------------
+  0       | 1     | length       | u8          | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8          | N/A    | 0x97
+  2       | 4     | time_offset  | u32         | LE     | Nanoseconds since last Time message
+  Total Length = 6 bytes
+  
+  Notes:
+    - Clear all orders for unit in header
+    - Sent at startup (Equities) and recovery events
+
+
+TransactionBegin (0xBC) - Options Only
+  @offset | @size | field_name   | type        | endian | description
+  --------|-------|--------------|-------------|--------|------------------------------------
+  0       | 1     | length       | u8          | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8          | N/A    | 0xBC
+  2       | 4     | time_offset  | u32         | LE     | Nanoseconds since last Time message
+  Total Length = 6 bytes
+
+
+TransactionEnd (0xBD) - Options Only
+  @offset | @size | field_name   | type        | endian | description
+  --------|-------|--------------|-------------|--------|------------------------------------
+  0       | 1     | length       | u8          | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8          | N/A    | 0xBD
+  2       | 4     | time_offset  | u32         | LE     | Nanoseconds since last Time message
+  Total Length = 6 bytes
+
+
+AddOrderLong (0x21)
+  @offset | @size | field_name   | type            | endian | description
+  --------|-------|--------------|-----------------|--------|------------------------------------
+  0       | 1     | length       | u8              | N/A    | Length including this field (34)
+  1       | 1     | message_type | u8              | N/A    | 0x21
+  2       | 4     | time_offset  | u32             | LE     | Nanoseconds since last Time message
+  6       | 8     | order_id     | u64             | LE     | Day-specific order identifier
+  14      | 1     | side         | Alphanumeric    | N/A    | 'B' = Buy, 'S' = Sell
+  15      | 4     | quantity     | u32             | LE     | Shares/contracts added to book
+  19      | 6     | symbol       | Printable ASCII | N/A    | Symbol, space-padded right
+  25      | 8     | price        | u64             | LE     | Binary Long Price (÷10,000)
+  33      | 1     | add_flags    | Bit Field       | N/A    | See AddFlags bits
+  Total Length = 34 bytes
+
+
+AddOrderShort (0x22)
+  @offset | @size | field_name   | type            | endian | description
+  --------|-------|--------------|-----------------|--------|------------------------------------
+  0       | 1     | length       | u8              | N/A    | Length including this field (26)
+  1       | 1     | message_type | u8              | N/A    | 0x22
+  2       | 4     | time_offset  | u32             | LE     | Nanoseconds since last Time message
+  6       | 8     | order_id     | u64             | LE     | Day-specific order identifier
+  14      | 1     | side         | Alphanumeric    | N/A    | 'B' = Buy, 'S' = Sell
+  15      | 2     | quantity     | u16             | LE     | Shares/contracts added to book
+  17      | 6     | symbol       | Printable ASCII | N/A    | Symbol, space-padded right
+  23      | 2     | price        | u16             | LE     | Binary Short Price (÷100)
+  25      | 1     | add_flags    | Bit Field       | N/A    | See AddFlags bits
+  Total Length = 26 bytes
+
+
+AddOrderExpanded (0x2F)
+  @offset | @size | field_name        | type            | endian | description
+  --------|-------|-------------------|-----------------|--------|------------------------------------
+  0       | 1     | length            | u8              | N/A    | 50 (Options) or 41 (Equities)
+  1       | 1     | message_type      | u8              | N/A    | 0x2F
+  2       | 4     | time_offset       | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | order_id          | u64             | LE     | Day-specific order identifier
+  14      | 1     | side              | Alphanumeric    | N/A    | 'B' = Buy, 'S' = Sell
+  15      | 4     | quantity          | u32             | LE     | Shares/contracts added to book
+  19      | 8     | symbol            | Printable ASCII | N/A    | Symbol, space-padded right
+  27      | 8     | price             | u64             | LE     | Binary Long Price (÷10,000)
+  35      | 1     | add_flags         | Bit Field       | N/A    | See AddFlags bits
+  36      | 4     | participant_id    | Alphanumeric    | N/A    | MPID/Executing Firm ID or spaces
+  40      | 1     | customer_indicator| Alphanumeric    | N/A    | Options: N/C/R; Equities: space
+  41      | 4     | client_id         | Alphanumeric    | N/A    | Options Only: user specified
+  45      | 5     | reserved          | Reserved        | N/A    | Options Only: reserved
+  Total Length = 50 bytes (Options), 41 bytes (Equities)
+
+
+OrderExecuted (0x23)
+  @offset | @size | field_name      | type         | endian | description
+  --------|-------|-----------------|--------------|--------|------------------------------------
+  0       | 1     | length          | u8           | N/A    | 27 (Options) or 26 (Equities)
+  1       | 1     | message_type    | u8           | N/A    | 0x23
+  2       | 4     | time_offset     | u32          | LE     | Nanoseconds since last Time
+  6       | 8     | order_id        | u64          | LE     | From prior Add Order
+  14      | 4     | executed_quantity| u32         | LE     | Shares/contracts executed
+  18      | 8     | execution_id    | u64          | LE     | Day-unique execution ID
+  26      | 1     | trade_condition | Alphanumeric | N/A    | Options Only: See TradeCondition
+  Total Length = 27 bytes (Options), 26 bytes (Equities)
+
+
+OrderExecutedAtPriceSize (0x24)
+  @offset | @size | field_name        | type            | endian | description
+  --------|-------|-------------------|-----------------|--------|------------------------------------
+  0       | 1     | length            | u8              | N/A    | 39 (Options) or 38 (Equities)
+  1       | 1     | message_type      | u8              | N/A    | 0x24
+  2       | 4     | time_offset       | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | order_id          | u64             | LE     | From prior Add Order
+  14      | 4     | executed_quantity | u32             | LE     | Shares/contracts executed
+  18      | 4     | remaining_quantity| u32             | LE     | Remaining after execution (0=dead)
+  22      | 8     | execution_id      | u64             | LE     | Day-unique execution ID
+  30      | 8     | price             | u64             | LE     | Binary Long Price (÷10,000)
+  38      | 1     | trade_condition   | Alphanumeric    | N/A    | Options Only: See TradeCondition
+  Total Length = 39 bytes (Options), 38 bytes (Equities)
+  
+  Notes:
+    - Sent when execution price differs from order's limit price
+    - remaining_quantity = 0 means order should be removed from book
+
+
+ReduceSizeLong (0x25)
+  @offset | @size | field_name       | type   | endian | description
+  --------|-------|------------------|--------|--------|------------------------------------
+  0       | 1     | length           | u8     | N/A    | Length including this field (18)
+  1       | 1     | message_type     | u8     | N/A    | 0x25
+  2       | 4     | time_offset      | u32    | LE     | Nanoseconds since last Time
+  6       | 8     | order_id         | u64    | LE     | From prior Add Order
+  14      | 4     | canceled_quantity| u32    | LE     | Shares/contracts canceled
+  Total Length = 18 bytes
+
+
+ReduceSizeShort (0x26)
+  @offset | @size | field_name       | type   | endian | description
+  --------|-------|------------------|--------|--------|------------------------------------
+  0       | 1     | length           | u8     | N/A    | Length including this field (16)
+  1       | 1     | message_type     | u8     | N/A    | 0x26
+  2       | 4     | time_offset      | u32    | LE     | Nanoseconds since last Time
+  6       | 8     | order_id         | u64    | LE     | From prior Add Order
+  14      | 2     | canceled_quantity| u16    | LE     | Shares/contracts canceled
+  Total Length = 16 bytes
+
+
+ModifyOrderLong (0x27)
+  @offset | @size | field_name   | type      | endian | description
+  --------|-------|--------------|-----------|--------|------------------------------------
+  0       | 1     | length       | u8        | N/A    | Length including this field (27)
+  1       | 1     | message_type | u8        | N/A    | 0x27
+  2       | 4     | time_offset  | u32       | LE     | Nanoseconds since last Time
+  6       | 8     | order_id     | u64       | LE     | From prior Add Order
+  14      | 4     | quantity     | u32       | LE     | New quantity after modification
+  18      | 8     | price        | u64       | LE     | Binary Long Price (÷10,000)
+  26      | 1     | modify_flags | Bit Field | N/A    | See ModifyFlags bits
+  Total Length = 27 bytes
+
+
+ModifyOrderShort (0x28)
+  @offset | @size | field_name   | type      | endian | description
+  --------|-------|--------------|-----------|--------|------------------------------------
+  0       | 1     | length       | u8        | N/A    | Length including this field (19)
+  1       | 1     | message_type | u8        | N/A    | 0x28
+  2       | 4     | time_offset  | u32       | LE     | Nanoseconds since last Time
+  6       | 8     | order_id     | u64       | LE     | From prior Add Order
+  14      | 2     | quantity     | u16       | LE     | New quantity after modification
+  16      | 2     | price        | u16       | LE     | Binary Short Price (÷100)
+  18      | 1     | modify_flags | Bit Field | N/A    | See ModifyFlags bits
+  Total Length = 19 bytes
+
+
+DeleteOrder (0x29)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (14)
+  1       | 1     | message_type | u8     | N/A    | 0x29
+  2       | 4     | time_offset  | u32    | LE     | Nanoseconds since last Time
+  6       | 8     | order_id     | u64    | LE     | From prior Add Order
+  Total Length = 14 bytes
+  
+  Notes:
+    - Order may return later with same Order ID in new Add Order message
+
+
+TradeLong (0x2A)
+  @offset | @size | field_name     | type            | endian | description
+  --------|-------|----------------|-----------------|--------|------------------------------------
+  0       | 1     | length         | u8              | N/A    | 42 (Options) or 41 (Equities)
+  1       | 1     | message_type   | u8              | N/A    | 0x2A
+  2       | 4     | time_offset    | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | order_id       | u64             | LE     | Obfuscated or actual Order ID
+  14      | 1     | side           | Alphanumeric    | N/A    | Always 'B' regardless of resting side
+  15      | 4     | quantity       | u32             | LE     | Shares/contracts executed
+  19      | 6     | symbol         | Printable ASCII | N/A    | Symbol, space-padded right
+  25      | 8     | price          | u64             | LE     | Binary Long Price (÷10,000)
+  33      | 8     | execution_id   | u64             | LE     | Day-unique execution ID
+  41      | 1     | trade_condition| Alphanumeric    | N/A    | Options Only: See TradeCondition
+  Total Length = 42 bytes (Options), 41 bytes (Equities)
+  
+  Notes:
+    - Used for hidden orders, routed executions, reserve order hidden portion
+    - Order ID is obfuscated by default (can opt-out at port level)
+
+
+TradeShort (0x2B)
+  @offset | @size | field_name     | type            | endian | description
+  --------|-------|----------------|-----------------|--------|------------------------------------
+  0       | 1     | length         | u8              | N/A    | 34 (Options) or 33 (Equities)
+  1       | 1     | message_type   | u8              | N/A    | 0x2B
+  2       | 4     | time_offset    | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | order_id       | u64             | LE     | Obfuscated or actual Order ID
+  14      | 1     | side           | Alphanumeric    | N/A    | Always 'B' regardless of resting side
+  15      | 2     | quantity       | u16             | LE     | Shares/contracts executed
+  17      | 6     | symbol         | Printable ASCII | N/A    | Symbol, space-padded right
+  23      | 2     | price          | u16             | LE     | Binary Short Price (÷100)
+  25      | 8     | execution_id   | u64             | LE     | Day-unique execution ID
+  33      | 1     | trade_condition| Alphanumeric    | N/A    | Options Only: See TradeCondition
+  Total Length = 34 bytes (Options), 33 bytes (Equities)
+
+
+TradeExpanded (0x30)
+  @offset | @size | field_name     | type            | endian | description
+  --------|-------|----------------|-----------------|--------|------------------------------------
+  0       | 1     | length         | u8              | N/A    | 44 (Options) or 43 (Equities)
+  1       | 1     | message_type   | u8              | N/A    | 0x30
+  2       | 4     | time_offset    | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | order_id       | u64             | LE     | Obfuscated or actual Order ID
+  14      | 1     | side           | Alphanumeric    | N/A    | Always 'B' regardless of resting side
+  15      | 4     | quantity       | u32             | LE     | Shares/contracts executed
+  19      | 8     | symbol         | Printable ASCII | N/A    | Symbol, space-padded right
+  27      | 8     | price          | u64             | LE     | Binary Long Price (÷10,000)
+  35      | 8     | execution_id   | u64             | LE     | Day-unique execution ID
+  43      | 1     | trade_condition| Alphanumeric    | N/A    | Options Only: See TradeCondition
+  Total Length = 44 bytes (Options), 43 bytes (Equities)
+
+
+TradeBreak (0x2C)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (14)
+  1       | 1     | message_type | u8     | N/A    | 0x2C
+  2       | 4     | time_offset  | u32    | LE     | Nanoseconds since last Time
+  6       | 8     | execution_id | u64    | LE     | Execution ID of broken trade
+  Total Length = 14 bytes
+
+
+EndOfSession (0x2D)
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (6)
+  1       | 1     | message_type | u8     | N/A    | 0x2D
+  2       | 4     | timestamp    | u32    | LE     | Nanoseconds since last Time
+  Total Length = 6 bytes
+
+
+SymbolMapping (0x2E) - Options Only
+  @offset | @size | field_name      | type            | endian | description
+  --------|-------|-----------------|-----------------|--------|------------------------------------
+  0       | 1     | length          | u8              | N/A    | Length including this field (38)
+  1       | 1     | message_type    | u8              | N/A    | 0x2E
+  2       | 6     | feed_symbol     | Printable ASCII | N/A    | 6-char feed symbol, space-padded
+  8       | 21    | osi_symbol      | Printable ASCII | N/A    | OSI Symbol
+  29      | 1     | symbol_condition| Alphanumeric    | N/A    | 'N'=Normal, 'C'=Closing Only
+  30      | 8     | underlying      | Alphanumeric    | N/A    | Underlying symbol, space-padded
+  Total Length = 38 bytes
+  
+  Notes:
+    - Un-sequenced (sequence = 0)
+    - Sent continuously throughout the day
+
+
+TradingStatusEquities (0x31)
+  @offset | @size | field_name    | type            | endian | description
+  --------|-------|---------------|-----------------|--------|------------------------------------
+  0       | 1     | length        | u8              | N/A    | Length including this field (18)
+  1       | 1     | message_type  | u8              | N/A    | 0x31
+  2       | 4     | time_offset   | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | symbol        | Printable ASCII | N/A    | Symbol, space-padded right
+  14      | 1     | trading_status| Alphanumeric    | N/A    | See TradingStatusEquities enum
+  15      | 1     | reg_sho_action| Alphanumeric    | N/A    | '0'=No test, '1'=Reg SHO in effect
+  16      | 1     | reserved1     | Reserved        | N/A    | Reserved
+  17      | 1     | reserved2     | Reserved        | N/A    | Reserved
+  Total Length = 18 bytes
+
+
+TradingStatusOptions (0x31)
+  @offset | @size | field_name       | type            | endian | description
+  --------|-------|------------------|-----------------|--------|------------------------------------
+  0       | 1     | length           | u8              | N/A    | Length including this field (18)
+  1       | 1     | message_type     | u8              | N/A    | 0x31
+  2       | 4     | time_offset      | u32             | LE     | Nanoseconds since last Time
+  6       | 6     | symbol           | Printable ASCII | N/A    | Symbol, space-padded right
+  12      | 2     | reserved         | Reserved        | N/A    | Reserved
+  14      | 1     | trading_status   | Alphanumeric    | N/A    | See TradingStatusOptions enum
+  15      | 1     | reserved         | Reserved        | N/A    | Reserved
+  16      | 1     | gth_trading_status| Alphanumeric   | N/A    | C1 Only: See GTHTradingStatus enum
+  17      | 1     | reserved2        | Reserved        | N/A    | Reserved
+  Total Length = 18 bytes
+
+
+WidthUpdate (0xD2) - Options Only
+  @offset | @size | field_name   | type            | endian | description
+  --------|-------|--------------|-----------------|--------|------------------------------------
+  0       | 1     | length       | u8              | N/A    | Length including this field (19)
+  1       | 1     | message_type | u8              | N/A    | 0xD2
+  2       | 4     | time_offset  | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | underlying   | Printable ASCII | N/A    | Underlying, space-padded right
+  14      | 1     | width_type   | Alphanumeric    | N/A    | 'R'=Regular, 'V'=Volatility
+  15      | 4     | multiplier   | u32             | LE     | Multiplier (÷10, 1 decimal place)
+  Total Length = 19 bytes
+
+
+AuctionUpdate (0x95) - BYX/BZX Equities Only
+  @offset | @size | field_name      | type            | endian | description
+  --------|-------|-----------------|-----------------|--------|------------------------------------
+  0       | 1     | length          | u8              | N/A    | Length including this field (47)
+  1       | 1     | message_type    | u8              | N/A    | 0x95
+  2       | 4     | time_offset     | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | stock_symbol    | Printable ASCII | N/A    | Symbol, space-padded right
+  14      | 1     | auction_type    | Alphanumeric    | N/A    | See AuctionType enum
+  15      | 8     | reference_price | u64             | LE     | Binary Long Price
+  23      | 4     | buy_shares      | u32             | LE     | Buy shares at reference price
+  27      | 4     | sell_shares     | u32             | LE     | Sell shares at reference price
+  31      | 8     | indicative_price| u64             | LE     | Binary Long Price (0 for BYX)
+  39      | 8     | auction_only_price| u64           | LE     | Binary Long Price (0 for BYX)
+  Total Length = 47 bytes
+
+
+OptionsAuctionUpdate (0xD1) - Options Only
+  @offset | @size | field_name           | type            | endian | description
+  --------|-------|----------------------|-----------------|--------|------------------------------------
+  0       | 1     | length               | u8              | N/A    | Length including this field (64)
+  1       | 1     | message_type         | u8              | N/A    | 0xD1
+  2       | 4     | time_offset          | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | symbol               | Printable ASCII | N/A    | Symbol, space-padded right
+  14      | 1     | auction_type         | Alphanumeric    | N/A    | See OptionsAuctionType enum
+  15      | 8     | reference_price      | u64             | LE     | Binary Long Price
+  23      | 4     | buy_contracts        | u32             | LE     | Cumulative buy contracts
+  27      | 4     | sell_contracts       | u32             | LE     | Cumulative sell contracts
+  31      | 8     | indicative_price     | u64             | LE     | Binary Long Price
+  39      | 8     | auction_only_price   | u64             | LE     | Binary Long Price
+  47      | 1     | opening_condition    | Alphanumeric    | N/A    | See OpeningCondition enum
+  48      | 8     | composite_market_bid | u64             | LE     | Binary Long Price
+  56      | 8     | composite_market_offer| u64            | LE     | Binary Long Price
+  Total Length = 64 bytes
+
+
+AuctionSummary (0x96)
+  @offset | @size | field_name   | type            | endian | description
+  --------|-------|--------------|-----------------|--------|------------------------------------
+  0       | 1     | length       | u8              | N/A    | Length including this field (27)
+  1       | 1     | message_type | u8              | N/A    | 0x96
+  2       | 4     | time_offset  | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | stock_symbol | Printable ASCII | N/A    | Symbol, space-padded right
+  14      | 1     | auction_type | Alphanumeric    | N/A    | See AuctionSummaryType enum
+  15      | 8     | price        | u64             | LE     | Binary Long Price
+  23      | 4     | shares_contracts| u32          | LE     | Shares/contracts executed
+  Total Length = 27 bytes
+
+
+AuctionNotification (0xAD) - C1/EDGX Options Only
+  @offset | @size | field_name        | type            | endian | description
+  --------|-------|-------------------|-----------------|--------|------------------------------------
+  0       | 1     | length            | u8              | N/A    | Length including this field (47)
+  1       | 1     | message_type      | u8              | N/A    | 0xAD
+  2       | 4     | time_offset       | u32             | LE     | Nanoseconds since last Time
+  6       | 6     | symbol            | Printable ASCII | N/A    | Symbol, space-padded right
+  12      | 8     | auction_id        | u64             | LE     | Day-specific auction identifier
+  20      | 1     | auction_type      | Alphanumeric    | N/A    | See AuctionNotificationType enum
+  21      | 1     | side              | Alphanumeric    | N/A    | 'B' or 'S'
+  22      | 8     | price             | u64             | LE     | Binary Long Price
+  30      | 4     | contracts         | u32             | LE     | Contracts available
+  34      | 1     | customer_indicator| Alphanumeric    | N/A    | 'N'=Non-Customer, 'C'=Customer
+  35      | 4     | participant_id    | Alphanumeric    | N/A    | Executing Broker (optional)
+  39      | 4     | auction_end_offset| u32             | LE     | Nanoseconds from last timestamp
+  43      | 4     | client_id         | Alphanumeric    | N/A    | User specified (optional)
+  Total Length = 47 bytes
+
+
+AuctionCancel (0xAE) - C1/EDGX Options Only
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (14)
+  1       | 1     | message_type | u8     | N/A    | 0xAE
+  2       | 4     | time_offset  | u32    | LE     | Nanoseconds since last Time
+  6       | 8     | auction_id   | u64    | LE     | Day-specific auction identifier
+  Total Length = 14 bytes
+
+
+AuctionTrade (0xAF) - C1/EDGX Options Only
+  @offset | @size | field_name   | type   | endian | description
+  --------|-------|--------------|--------|--------|------------------------------------
+  0       | 1     | length       | u8     | N/A    | Length including this field (34)
+  1       | 1     | message_type | u8     | N/A    | 0xAF
+  2       | 4     | time_offset  | u32    | LE     | Nanoseconds since last Time
+  6       | 8     | auction_id   | u64    | LE     | Day-specific auction identifier
+  14      | 8     | execution_id | u64    | LE     | Day-specific execution identifier
+  22      | 8     | price        | u64    | LE     | Binary Long Price
+  30      | 4     | contracts    | u32    | LE     | Contracts traded
+  Total Length = 34 bytes
+
+
+RetailPriceImprovement (0x98) - BYX Only
+  @offset | @size | field_name   | type            | endian | description
+  --------|-------|--------------|-----------------|--------|------------------------------------
+  0       | 1     | length       | u8              | N/A    | Length including this field (15)
+  1       | 1     | message_type | u8              | N/A    | 0x98
+  2       | 4     | time_offset  | u32             | LE     | Nanoseconds since last Time
+  6       | 8     | symbol       | Printable ASCII | N/A    | Symbol, space-padded right
+  14      | 1     | rpi          | Alphanumeric    | N/A    | See RPI enum
+  Total Length = 15 bytes
+
+
+SOQStrikeRangeUpdate (0x9D) - C1 Only
+  @offset | @size | field_name       | type            | endian | description
+  --------|-------|------------------|-----------------|--------|------------------------------------
+  0       | 1     | length           | u8              | N/A    | Length including this field (42)
+  1       | 1     | message_type     | u8              | N/A    | 0x9D
+  2       | 4     | time_offset      | u32             | LE     | Nanoseconds since last Time
+  6       | 20    | soq_identifier   | Printable ASCII | N/A    | CSMi dissemination symbol
+  26      | 8     | lower_strike_price| u64            | LE     | Binary Long Price
+  34      | 8     | upper_strike_price| u64            | LE     | Binary Long Price
+  Total Length = 42 bytes
+
+
+ConstituentSymbolMapping (0x9E) - C1 Only
+  @offset | @size | field_name      | type            | endian | description
+  --------|-------|-----------------|-----------------|--------|------------------------------------
+  0       | 1     | length          | u8              | N/A    | Length including this field (58)
+  1       | 1     | message_type    | u8              | N/A    | 0x9E
+  2       | 6     | feed_symbol     | Printable ASCII | N/A    | 6-char feed symbol
+  8       | 21    | osi_symbol      | Printable ASCII | N/A    | OSI Symbol
+  29      | 1     | symbol_condition| Alphanumeric    | N/A    | 'N'=Normal, 'C'=Closing Only
+  30      | 8     | underlying      | Alphanumeric    | N/A    | Underlying symbol
+  38      | 20    | soq_identifier  | Printable ASCII | N/A    | CSMi dissemination symbol
+  Total Length = 58 bytes
+
+
+--- ENUMS ---
+
+LoginStatus (Alphanumeric, 1 byte)
+  'A' = Login accepted
+  'N' = Not authorized (invalid username/password)
+  'B' = Session in use
+  'S' = Invalid session
+
+GapResponseStatus (Alphanumeric, 1 byte)
+  'A' = Accepted
+  'O' = Out of range (ahead of sequence or too far behind)
+  'D' = Daily gap request allocation exhausted
+  'M' = Minute gap request allocation exhausted
+  'S' = Second gap request allocation exhausted
+  'C' = Count request limit for one gap request exceeded
+  'I' = Invalid Unit specified in request
+  'U' = Unit is currently unavailable
+
+SpinResponseStatus (Alphanumeric, 1 byte)
+  'A' = Accepted
+  'O' = Out of range
+  'S' = Spin already in process
+
+Side (Alphanumeric, 1 byte)
+  'B' = Buy Order
+  'S' = Sell Order
+
+AddFlags (Bit Field, 1 byte)
+  Bit 0 = Reserved (always 1)
+  Bit 1-2 = Reserved
+  Bit 3 = AON (Options only): 0=Firm quote, 1=All or None
+  Bit 4-7 = Reserved
+
+ModifyFlags (Bit Field, 1 byte)
+  Bit 0 = Display: 0=Not in SIP quote, 1=In SIP quote
+  Bit 1 = Maintain Priority: 0=Reset priority, 1=Maintain priority
+  Bit 2-7 = Reserved
+
+TradingStatusEquities (Alphanumeric, 1 byte)
+  'A' = Accepting Orders for Queuing
+  'H' = Halted
+  'Q' = Quote-Only
+  'S' = Exchange Specific Suspension
+  'T' = Trading
+
+TradingStatusOptions (Alphanumeric, 1 byte)
+  'H' = Halted
+  'L' = Curb Trading (C1 Only)
+  'Q' = Quote-Only
+  'R' = Opening Rotation
+  'T' = RTH Trading
+
+GTHTradingStatus (Alphanumeric, 1 byte) - C1 Only
+  'H' = Halted
+  'Q' = Quote-Only
+  'R' = Opening Rotation
+  'T' = Trading
+
+SymbolCondition (Alphanumeric, 1 byte)
+  'N' = Normal
+  'C' = Closing Only
+
+AuctionType (Alphanumeric, 1 byte) - BZX Equities
+  'O' = Opening Auction
+  'C' = Closing Auction
+  'H' = Halt Auction
+  'I' = IPO Auction
+  'M' = Cboe Market Close
+  'P' = Periodic Auction (BYX Only)
+
+OptionsAuctionType (Alphanumeric, 1 byte)
+  'G' = GTH Opening (C1 Only)
+  'O' = RTH Opening (C1 Only)
+  'H' = Halt Re-Opening
+  'V' = Volatility Opening
+
+OpeningCondition (Alphanumeric, 1 byte)
+  'O' = Would open
+  'Q' = Need quote to open
+  'B' = Need more buyers (C1 Only)
+  'S' = Need more sellers (C1 Only)
+  'C' = Crossed Composite Market
+
+AuctionSummaryType (Alphanumeric, 1 byte)
+  'O' = Opening Auction (C1 Only)
+  'C' = Closing Auction
+  'G' = GTH Opening (C1 Only)
+  'H' = Halt Auction
+  'I' = IPO Auction
+  'M' = Cboe Market Close
+  'V' = Volatility Auction
+  'P' = Periodic Auction (BYX Only)
+
+AuctionNotificationType (Alphanumeric, 1 byte)
+  'B' = BAM (EDGX) / AIM (C1)
+  'S' = Solicitation Auction Mechanism (C1 Only)
+  'T' = Step Up Mechanism (SUM)
+  'A' = SUM All or None
+
+CustomerIndicator (Alphanumeric, 1 byte)
+  'N' = Non-Customer
+  'C' = Customer
+  'R' = Retail Priority order (EDGX Equities only)
+
+RPI (Alphanumeric, 1 byte) - BYX Only
+  'B' = Buy Side RPI
+  'S' = Sell Side RPI
+  'A' = Buy & Sell RPI
+  'N' = No RPI
+
+WidthType (Alphanumeric, 1 byte)
+  'R' = Regular
+  'V' = Volatility
+
+TradeCondition (Alphanumeric, 1 byte) - Options Only
+  ' ' = Normal (space character, 0x20)
+  'a' = Single Leg Auction Non ISO (AIM, SAM)
+  'b' = Single Leg Auction ISO (AIM ISO, SAM ISO)
+  'c' = Single Leg Cross Non ISO (Cust to Cust AIM, QCC)
+  'd' = Single Leg Cross ISO (Cust to Cust AIM ISO)
+  'e' = Single Leg Floor Trade
+  'f' = Complex to Complex Electronic Trade (COA)
+  'g' = Complex Auction Trade (C-AIM, C-SAM)
+  'h' = Complex Cross (Cust to Cust C-AIM, C-QCC)
+  'j' = Complex Electronic Trade Against Single Leg(s)
+  'k' = Complex with Stock Options Auction Trade (C-AIM w/ Stock, C-SAM w/ Stock)
+  'm' = Complex Floor Trade Against Single Leg(s)
+  'n' = Complex with Stock Electronic Trade
+  'o' = Complex with Stock Cross (C-QCC w/ Stock)
+  'p' = Complex with Stock Floor Trade
+  't' = Complex Floor Trade of Proprietary Products - Combo Order
+  'u' = Multilateral Compression Trade of Proprietary Products
+  'v' = Extended Hours Trade (Curb session)
+  'I' = Electronic Trade
+  'K' = Cabinet Order
+  'O' = Opening Trade
+  'S' = ISO
+
+ExecutionIdPrefix (First character of base-36 Execution ID)
+  '0' = Cboe Internal Match
+  '1' = Cboe Internal Match (C1 Options Only)
+  '2' = Cboe Internal Match (C1 Options Only)
+  'C' = Auction Fill (Equities Only)
+  'M' = Cboe Market Close Trade
+  'P' = Periodic Auction Trade (BYX Only)
+  'R' = Routed Trade
+
+
+--- VARIABLE LENGTH RULES ---
+
+Message Length Determination:
+- First byte of every message is the length (including the length byte itself)
+- Length field allows parsing unknown message types (skip length-1 bytes)
+
+Symbol Field Sizes:
+- Standard: 6 bytes (Printable ASCII, space-padded)
+- Expanded (ISRA plan): 8 bytes (Printable ASCII, space-padded)
+
+Options vs Equities Message Differences:
+- Order Executed: +1 byte for Trade Condition (Options)
+- Order Executed at Price/Size: +1 byte for Trade Condition (Options)
+- Trade (all variants): +1 byte for Trade Condition (Options)
+- Add Order Expanded: +9 bytes for Options fields (Customer Indicator, Client ID, Reserved)
+- Trading Status: Different field layouts for Options vs Equities
+- Time: +4 bytes for Epoch Time (C1 Options Only)
+
+
+--- PARSING SEQUENCE ---
+
+1. Parse SequencedUnitHeader (8 bytes):
+   - Extract hdr_length, hdr_count, hdr_unit, hdr_sequence
+   - If hdr_count = 0: This is a heartbeat message
+   
+2. For each message (hdr_count times):
+   a. Read length byte (1 byte)
+   b. Read message_type byte (1 byte)
+   c. Based on message_type, parse remaining (length - 2) bytes
+   d. Implied sequence = hdr_sequence + message_index
+   
+3. Sequence Number Handling:
+   - Track expected sequence per unit
+   - Detect gaps: received_sequence > expected_sequence
+   - Handle rollover: 4,294,967,295 -> 1 (skip 0)
+   
+4. Time Offset Resolution:
+   - Maintain last Time message per unit
+   - Calculate absolute time: last_time_seconds + time_offset_nanoseconds
+   - For C1 Options: Use TimeReference for midnight boundary crossings
+
+5. Book Maintenance:
+   - Add Order: Insert into book keyed by Order ID
+   - Modify Order: Update price/quantity for Order ID
+   - Reduce Size: Decrease quantity for Order ID
+   - Delete Order: Remove Order ID from book
+   - Order Executed: Decrease quantity; remove if zero
+   - Order Executed at Price/Size: Use remaining_quantity; remove if zero
+   - Unit Clear: Remove all orders for unit
+   - Trade/Trade Break: Informational only (hidden orders)
+
+
+--- SPECIAL CASES ---
+
+1. Message Type Growth:
+   - Cboe may add fields to end of messages without notice
+   - Always use length field to skip unknown trailing bytes
+   - Parser should handle length > expected gracefully
+
+2. Unknown Message Types:
+   - Skip (length - 1) bytes after message_type
+   - Do not fail; log warning and continue
+
+3. Framing Differences:
+   - UDP: Self-contained; single SequencedUnitHeader per frame
+   - TCP (GRP/Spin): May span frame boundaries; use length-based parsing
+
+4. Sequence Rollover:
+   - Maximum: 4,294,967,295 (u32::MAX)
+   - Rolls to 1 (not 0)
+   - Gap requests must handle rollover in ranges
+
+5. Options vs Equities Detection:
+   - Based on market/unit configuration (external)
+   - Some messages have different lengths
+   - Trade Condition byte present only for Options
+
+6. Symbol Mapping (Options):
+   - 6-char feed symbols map to 21-char OSI symbols
+   - Mapping messages are un-sequenced (sequence = 0)
+   - Sent continuously; maintain mapping table
+
+7. C1 Options 24x5 Trading:
+   - May cross midnight boundary
+   - TimeReference resets at midnight ET
+   - Time message Time field resets to seconds from new midnight
+
+8. Reserve Orders:
+   - Displayed portion: Order Executed (0x23)
+   - Hidden portion: Trade (0x2A/0x2B/0x30) with obfuscated Order ID
+   - Refresh: New Add Order with new Order ID
+
+9. Transaction Blocks (Options):
+   - TransactionBegin/TransactionEnd bracket related messages
+   - Used for symbol state transitions
+   - Can be ignored for pure book building
+
+10. Price Interpretation:
+    - Binary Short Price: value / 100 (2 decimal places)
+    - Binary Long Price: value / 10000 (4 decimal places)
+    - Multiplier: value / 10 (1 decimal place)
+
+
+--- COMPLETENESS CHECK ---
+
+[x] All header structures (SequencedUnitHeader)
+[x] All record/packet structures (41 message types documented)
+[x] All enumerated types (18 enums documented)
+[x] Byte order detection mechanism (always Little Endian)
+[x] Length/count fields that control iteration (hdr_count, length)
+[x] Version differences (Options vs Equities, C1 specific)
+[x] Trade Condition codes (21 values for Options)
+[x] Bit field definitions (AddFlags, ModifyFlags)
+
+
+--- NOM PARSER IMPLEMENTATION NOTES ---
+
+Suggested nom combinators:
+- le_u8, le_u16, le_u32, le_u64 for binary fields
+- take(n) for fixed-size ASCII fields
+- map_res for converting ASCII to strings
+- bits/bits! for bit field parsing
+- length_data with le_u8 for message framing
+- many_m_n for parsing hdr_count messages
+
+Error handling:
+- Use nom::error::VerboseError for debugging
+- Implement custom error types for protocol-specific errors
+- Handle unknown message types gracefully with alt/fail
+
+Performance considerations:
+- Zero-copy parsing where possible using &[u8] slices
+- Pre-allocate order book data structures
+- Consider SIMD for high-volume scenarios
