@@ -1,0 +1,1524 @@
+=== FILE FORMAT: UTP Binary Data Feed Protocol ===
+Source Document: UTP Data Feed Services Specification Version 3.0
+Version: 3.0 (August 2025)
+Byte Order: Big-Endian (Network Byte Order)
+Protocol: INET MoldUDP64 (transport layer)
+
+--- DATA TYPES [§1.2, §1.2.1] ---
+
+Type        | Size    | Description                                           | Source
+------------|---------|-------------------------------------------------------|--------
+byte        | 1       | Single ASCII character (alphanumeric)                 | §1.2.1
+short       | 2       | Big-Endian Unsigned 16-Bit Integer                    | §1.2.1
+int         | 4       | Big-Endian Unsigned 32-Bit Integer                    | §1.2.1
+long        | 8       | Big-Endian Unsigned 64-Bit Integer                    | §1.2.1
+byte[]      | N       | Fixed Width ASCII Field (left-justified, space-padded)| §1.2.1
+varbyte[]   | var     | Variable Width ASCII Field (length in prior field)    | §1.2.1
+
+--- NUMERIC ENCODING RULES [§1.2.2] ---
+
+- All multi-byte numeric values are Big-Endian (network byte order)
+- Prices in `long` fields: 6 implied decimal places (divide by 1,000,000)
+- Prices in `short` fields: 2 implied decimal places (divide by 100)
+- Volume in `long` fields: 6 implied decimal places (divide by 1,000,000)
+- Timestamps (`long`): nanoseconds since Unix Epoch
+
+--- ALPHA ENCODING RULES [§1.2.3] ---
+
+- ASCII encoded
+- Left-justified
+- Right-padded with space characters (0x20)
+- Alphanumeric fields include: byte, byte[], varbyte[]
+
+--- STRUCTURES ---
+
+MessageHeader [§2.1]
+    @offset | @size | field_name   | type | endian | description                    | source
+    --------|-------|--------------|------|--------|--------------------------------|--------
+    0       | 1     | version      | byte | n/a    | Protocol Version (ASCII '1')   | §2.1
+    1       | 1     | msgCategory  | byte | n/a    | Message Category               | §2.1
+    2       | 1     | msgType      | byte | n/a    | Message Type                   | §2.1
+    3       | 1     | orig         | byte | n/a    | Market Center Originator ID    | §2.1, §3.1
+    4       | 1     | subMarketId  | byte | n/a    | Sub-Market Center ID           | §2.1, §3.2
+    5       | 8     | sipTime      | long | BE     | SIP Timestamp (ns since Epoch) | §2.1
+    13      | 8     | timestamp1   | long | BE     | Participant Timestamp          | §2.1
+    21      | 8     | partToken    | long | BE     | Participant Token (internal)   | §2.1
+    --------|-------|--------------|------|--------|--------------------------------|--------
+    Total: 29 bytes
+
+    Notes: [§2.1]
+    - All outbound messages begin with this header
+    - version field allows message format versioning during transitions
+    - orig='D' indicates FINRA; subMarketId then identifies specific TRF
+    - partToken is for UTP SIP internal use; recipients should ignore
+
+=== QUOTE MESSAGES (msgCategory = 'Q') ===
+
+UTPQuoteMessageShortForm (QE) [§2.2.1]
+    @offset | @size | field_name        | type    | endian | description                  | source
+    --------|-------|-------------------|---------|--------|------------------------------|--------
+    0       | 1     | version           | byte    | n/a    | '1' - Protocol Version       | §2.2.1
+    1       | 1     | msgCategory       | byte    | n/a    | 'Q' - Quote Messages         | §2.2.1
+    2       | 1     | msgType           | byte    | n/a    | 'E' - Short-format Quote     | §2.2.1
+    3       | 1     | orig              | byte    | n/a    | Market Center Originator ID  | §2.2.1
+    4       | 1     | subMarketId       | byte    | n/a    | Sub Market Center ID         | §2.2.1
+    5       | 8     | sipTime           | long    | BE     | SIP Timestamp                | §2.2.1
+    13      | 8     | timestamp1        | long    | BE     | Participant Timestamp        | §2.2.1
+    21      | 8     | partToken         | long    | BE     | Participant Token            | §2.2.1
+    29      | 5     | symbol            | byte[5] | n/a    | Security Identifier          | §2.2.1
+    34      | 2     | bidPrice          | short   | BE     | Bid Price (2 decimals)       | §2.2.1
+    36      | 2     | bidSize           | short   | BE     | Bid Size                     | §2.2.1
+    38      | 2     | askPrice          | short   | BE     | Ask Price (2 decimals)       | §2.2.1
+    40      | 2     | askSize           | short   | BE     | Ask Size                     | §2.2.1
+    42      | 1     | quoteCond         | byte    | n/a    | Quote Condition              | §2.2.1, §3.3
+    43      | 1     | sipGenUpdate      | byte    | n/a    | SIP Generated Update Flag    | §2.2.1, §3.4
+    44      | 1     | luldBboIndicator  | byte    | n/a    | LULD BBO Indicator           | §2.2.1, §3.5
+    45      | 1     | rii               | byte    | n/a    | Retail Interest Indicator    | §2.2.1, §3.7
+    46      | 1     | nbboIndicator     | byte    | n/a    | NBBO Appendage Indicator     | §2.2.1, §3.8
+    47      | 1     | luldNbboIndicator | byte    | n/a    | LULD National BBO Indicator  | §2.2.1, §3.6
+    --------|-------|-------------------|---------|--------|------------------------------|--------
+    Total: 48 bytes (base, before any appendages)
+
+    Constraints: [§2.2.1]
+    - Symbol must be 5 characters or less
+    - Bid/Ask prices max $655.35
+    - Bid/Ask prices use only 2 decimal precision
+    - Bid/Ask sizes < 65535
+    - Quote must NOT be from FINRA
+
+    Notes: [§2.2, §2.2.1]
+    - To be RETIRED with Odd Lot Release on April 27, 2026
+    - nbboIndicator determines if NBBO appendage follows
+
+UTPQuoteMessageLongForm (QF) [§2.2.2]
+    @offset | @size | field_name           | type     | endian | description                  | source
+    --------|-------|----------------------|----------|--------|------------------------------|--------
+    0       | 1     | version              | byte     | n/a    | '1' - Protocol Version       | §2.2.2
+    1       | 1     | msgCategory          | byte     | n/a    | 'Q' - Quote Messages         | §2.2.2
+    2       | 1     | msgType              | byte     | n/a    | 'F' - Long-format Quote      | §2.2.2
+    3       | 1     | orig                 | byte     | n/a    | Market Center Originator ID  | §2.2.2
+    4       | 1     | subMarketId          | byte     | n/a    | Sub Market Center ID         | §2.2.2
+    5       | 8     | sipTime              | long     | BE     | SIP Timestamp                | §2.2.2
+    13      | 8     | timestamp1           | long     | BE     | Participant Timestamp        | §2.2.2
+    21      | 8     | partToken            | long     | BE     | Participant Token            | §2.2.2
+    29      | 8     | timestamp2           | long     | BE     | FINRA Timestamp (0 if N/A)   | §2.2.2
+    37      | 11    | symbol               | byte[11] | n/a    | Security Identifier          | §2.2.2
+    48      | 8     | bidPrice             | long     | BE     | Bid Price (6 decimals)       | §2.2.2
+    56      | 4     | bidSize              | int      | BE     | Bid Size                     | §2.2.2
+    60      | 8     | askPrice             | long     | BE     | Ask Price (6 decimals)       | §2.2.2
+    68      | 4     | askSize              | int      | BE     | Ask Size                     | §2.2.2
+    72      | 1     | quoteCond            | byte     | n/a    | Quote Condition              | §2.2.2, §3.3
+    73      | 1     | sipGenUpdate         | byte     | n/a    | SIP Generated Update Flag    | §2.2.2, §3.4
+    74      | 1     | luldBboIndicator     | byte     | n/a    | LULD BBO Indicator           | §2.2.2, §3.5
+    75      | 1     | rii                  | byte     | n/a    | Retail Interest Indicator    | §2.2.2, §3.7
+    76      | 1     | nbboIndicator        | byte     | n/a    | NBBO Appendage Indicator     | §2.2.2, §3.8
+    77      | 1     | luldNbboIndicator    | byte     | n/a    | LULD National BBO Indicator  | §2.2.2, §3.6
+    78      | 1     | finraAdfMpidIndicator| byte     | n/a    | FINRA ADF MPID Appendage Ind | §2.2.2, §3.9
+    --------|-------|----------------------|----------|--------|------------------------------|--------
+    Total: 79 bytes (base, before any appendages)
+
+    Notes: [§2.2.2]
+    - To be RETIRED with Odd Lot Release on April 27, 2026
+    - timestamp2 = 0 if from Exchange; populated if from FINRA ADF
+    - May have NBBO appendage and/or ADF MPID appendage following
+
+FINRAADFMarketParticipantQuotationMessage (QM) [§2.2.3]
+    @offset | @size | field_name  | type     | endian | description                  | source
+    --------|-------|-------------|----------|--------|------------------------------|--------
+    0       | 1     | version     | byte     | n/a    | '1' - Protocol Version       | §2.2.3
+    1       | 1     | msgCategory | byte     | n/a    | 'Q' - Quote Messages         | §2.2.3
+    2       | 1     | msgType     | byte     | n/a    | 'M' - FINRA ADF Quote        | §2.2.3
+    3       | 1     | orig        | byte     | n/a    | Market Center Originator ID  | §2.2.3
+    4       | 1     | subMarketId | byte     | n/a    | Sub Market Center ID         | §2.2.3
+    5       | 8     | sipTime     | long     | BE     | SIP Timestamp                | §2.2.3
+    13      | 8     | timestamp1  | long     | BE     | Participant Timestamp        | §2.2.3
+    21      | 8     | partToken   | long     | BE     | Participant Token            | §2.2.3
+    29      | 8     | timestamp2  | long     | BE     | FINRA Timestamp              | §2.2.3
+    37      | 11    | symbol      | byte[11] | n/a    | Security Identifier          | §2.2.3
+    48      | 8     | bidPrice    | long     | BE     | Bid Price (6 decimals)       | §2.2.3
+    56      | 4     | bidSize     | int      | BE     | Bid Size                     | §2.2.3
+    60      | 8     | askPrice    | long     | BE     | Ask Price (6 decimals)       | §2.2.3
+    68      | 4     | askSize     | int      | BE     | Ask Size                     | §2.2.3
+    72      | 1     | quoteCond   | byte     | n/a    | Quote Condition              | §2.2.3, §3.3
+    73      | 4     | mpid        | byte[4]  | n/a    | FINRA Market Participant     | §2.2.3
+    --------|-------|-------------|----------|--------|------------------------------|--------
+    Total: 77 bytes
+
+    Notes: [§2.2.3]
+    - Sent for FINRA quotes not affecting NBBO or FINRA BBO
+    - Will continue to be supported after Odd Lot Release
+
+CombinedQuoteMessageShortForm (QC) [§2.2.4.1]
+    @offset | @size | field_name        | type    | endian | description                  | source
+    --------|-------|-------------------|---------|--------|------------------------------|--------
+    0       | 1     | version           | byte    | n/a    | '1' - Protocol Version       | §2.2.4.1
+    1       | 1     | msgCategory       | byte    | n/a    | 'Q' - Quote Messages         | §2.2.4.1
+    2       | 1     | msgType           | byte    | n/a    | 'C' - Short Combined Quote   | §2.2.4.1
+    3       | 1     | orig              | byte    | n/a    | Market Center Originator ID  | §2.2.4.1
+    4       | 1     | subMarketId       | byte    | n/a    | Sub Market Center ID         | §2.2.4.1
+    5       | 8     | sipTime           | long    | BE     | SIP Timestamp                | §2.2.4.1
+    13      | 8     | timestamp1        | long    | BE     | Participant Timestamp        | §2.2.4.1
+    21      | 8     | partToken         | long    | BE     | Participant Token            | §2.2.4.1
+    29      | 5     | symbol            | byte[5] | n/a    | Security Identifier          | §2.2.4.1
+    34      | 2     | bidPrice          | short   | BE     | Protected Bid Price          | §2.2.4.1
+    36      | 2     | bidSize           | short   | BE     | Protected Bid Size           | §2.2.4.1
+    38      | 2     | askPrice          | short   | BE     | Protected Ask Price          | §2.2.4.1
+    40      | 2     | askSize           | short   | BE     | Protected Ask Size           | §2.2.4.1
+    42      | 1     | quoteCond         | byte    | n/a    | Quote Condition              | §2.2.4.1, §3.3
+    43      | 1     | sipGenUpdate      | byte    | n/a    | SIP Generated Update Flag    | §2.2.4.1, §3.4
+    44      | 1     | luldBboIndicator  | byte    | n/a    | LULD BBO Indicator           | §2.2.4.1, §3.5
+    45      | 1     | rii               | byte    | n/a    | Retail Interest Indicator    | §2.2.4.1, §3.7
+    46      | 1     | nbboIndicator     | byte    | n/a    | NBBO Appendage Indicator     | §2.2.4.1, §3.8
+    47      | 1     | luldNbboIndicator | byte    | n/a    | LULD National BBO Indicator  | §2.2.4.1, §3.6
+    48      | 1     | boloIndicator     | byte    | n/a    | BOLO Appendage Indicator     | §2.2.4.1, §3.30
+    49      | 1     | olAttachmentType  | byte    | n/a    | Odd Lot Attachment Type      | §2.2.4.1, §3.31
+    50      | 2     | olAttachmentCount | short   | BE     | Odd Lot Attachment Count     | §2.2.4.1
+    --------|-------|-------------------|---------|--------|------------------------------|--------
+    Total: 52 bytes (base, before appendages/attachments)
+
+    Notes: [§2.2.4.1]
+    - New message for Odd Lot Release (April 27, 2026)
+    - Appendage order: NBBO → BOLO → Odd Lot Attachment
+
+CombinedQuoteMessageLongForm (QD) [§2.2.4.2]
+    @offset | @size | field_name           | type     | endian | description                  | source
+    --------|-------|----------------------|----------|--------|------------------------------|--------
+    0       | 1     | version              | byte     | n/a    | '1' - Protocol Version       | §2.2.4.2
+    1       | 1     | msgCategory          | byte     | n/a    | 'Q' - Quote Messages         | §2.2.4.2
+    2       | 1     | msgType              | byte     | n/a    | 'D' - Long Combined Quote    | §2.2.4.2
+    3       | 1     | orig                 | byte     | n/a    | Market Center Originator ID  | §2.2.4.2
+    4       | 1     | subMarketId          | byte     | n/a    | Sub Market Center ID         | §2.2.4.2
+    5       | 8     | sipTime              | long     | BE     | SIP Timestamp                | §2.2.4.2
+    13      | 8     | timestamp1           | long     | BE     | Participant Timestamp        | §2.2.4.2
+    21      | 8     | partToken            | long     | BE     | Participant Token            | §2.2.4.2
+    29      | 8     | timestamp2           | long     | BE     | ADF Timestamp                | §2.2.4.2
+    37      | 11    | symbol               | byte[11] | n/a    | Security Identifier          | §2.2.4.2
+    48      | 8     | bidPrice             | long     | BE     | Protected Bid Price          | §2.2.4.2
+    56      | 4     | bidSize              | int      | BE     | Protected Bid Size           | §2.2.4.2
+    60      | 8     | askPrice             | long     | BE     | Protected Ask Price          | §2.2.4.2
+    68      | 4     | askSize              | int      | BE     | Protected Ask Size           | §2.2.4.2
+    72      | 1     | quoteCond            | byte     | n/a    | Quote Condition              | §2.2.4.2
+    73      | 1     | sipGenUpdate         | byte     | n/a    | SIP Generated Update Flag    | §2.2.4.2
+    74      | 1     | luldBboIndicator     | byte     | n/a    | LULD BBO Indicator           | §2.2.4.2
+    75      | 1     | rii                  | byte     | n/a    | Retail Interest Indicator    | §2.2.4.2
+    76      | 1     | nbboIndicator        | byte     | n/a    | NBBO Appendage Indicator     | §2.2.4.2
+    77      | 1     | luldNbboIndicator    | byte     | n/a    | LULD National BBO Indicator  | §2.2.4.2
+    78      | 1     | finraAdfMpidIndicator| byte     | n/a    | FINRA ADF MPID Appendage Ind | §2.2.4.2
+    79      | 1     | boloIndicator        | byte     | n/a    | BOLO Appendage Indicator     | §2.2.4.2
+    80      | 1     | olAttachmentType     | byte     | n/a    | Odd Lot Attachment Type      | §2.2.4.2
+    81      | 2     | olAttachmentCount    | short    | BE     | Odd Lot Attachment Count     | §2.2.4.2
+    --------|-------|----------------------|----------|--------|------------------------------|--------
+    Total: 83 bytes (base, before appendages/attachments)
+
+    Notes: [§2.2.4.2]
+    - Appendage order: NBBO → ADF MPID → BOLO → Odd Lot Attachment
+
+OddLotQuoteMessageShortForm (QA) [§2.2.4.3]
+    @offset | @size | field_name        | type    | endian | description                  | source
+    --------|-------|-------------------|---------|--------|------------------------------|--------
+    0       | 1     | version           | byte    | n/a    | '1' - Protocol Version       | §2.2.4.3
+    1       | 1     | msgCategory       | byte    | n/a    | 'Q' - Quote Messages         | §2.2.4.3
+    2       | 1     | msgType           | byte    | n/a    | 'A' - Short Odd Lot Quote    | §2.2.4.3
+    3       | 1     | orig              | byte    | n/a    | Market Center Originator ID  | §2.2.4.3
+    4       | 1     | subMarketId       | byte    | n/a    | Sub Market Center ID         | §2.2.4.3
+    5       | 8     | sipTime           | long    | BE     | SIP Timestamp                | §2.2.4.3
+    13      | 8     | timestamp1        | long    | BE     | Participant Timestamp        | §2.2.4.3
+    21      | 8     | partToken         | long    | BE     | Participant Token            | §2.2.4.3
+    29      | 5     | symbol            | byte[5] | n/a    | Security Identifier          | §2.2.4.3
+    34      | 1     | sipGenUpdate      | byte    | n/a    | SIP Generated Update Flag    | §2.2.4.3
+    35      | 1     | boloIndicator     | byte    | n/a    | BOLO Appendage Indicator     | §2.2.4.3
+    36      | 1     | olAttachmentType  | byte    | n/a    | Odd Lot Attachment Type      | §2.2.4.3
+    37      | 2     | olAttachmentCount | short   | BE     | Odd Lot Attachment Count     | §2.2.4.3
+    --------|-------|-------------------|---------|--------|------------------------------|--------
+    Total: 39 bytes (base)
+
+OddLotQuoteMessageLongForm (QB) [§2.2.4.4]
+    @offset | @size | field_name        | type     | endian | description                  | source
+    --------|-------|-------------------|----------|--------|------------------------------|--------
+    0       | 1     | version           | byte     | n/a    | '1' - Protocol Version       | §2.2.4.4
+    1       | 1     | msgCategory       | byte     | n/a    | 'Q' - Quote Messages         | §2.2.4.4
+    2       | 1     | msgType           | byte     | n/a    | 'B' - Long Odd Lot Quote     | §2.2.4.4
+    3       | 1     | orig              | byte     | n/a    | Market Center Originator ID  | §2.2.4.4
+    4       | 1     | subMarketId       | byte     | n/a    | Sub Market Center ID         | §2.2.4.4
+    5       | 8     | sipTime           | long     | BE     | SIP Timestamp                | §2.2.4.4
+    13      | 8     | timestamp1        | long     | BE     | Participant Timestamp        | §2.2.4.4
+    21      | 8     | partToken         | long     | BE     | Participant Token            | §2.2.4.4
+    29      | 8     | timestamp2        | long     | BE     | ADF Timestamp                | §2.2.4.4
+    37      | 11    | symbol            | byte[11] | n/a    | Security Identifier          | §2.2.4.4
+    48      | 1     | sipGenUpdate      | byte     | n/a    | SIP Generated Update Flag    | §2.2.4.4
+    49      | 1     | boloIndicator     | byte     | n/a    | BOLO Appendage Indicator     | §2.2.4.4
+    50      | 1     | olAttachmentType  | byte     | n/a    | Odd Lot Attachment Type      | §2.2.4.4
+    51      | 2     | olAttachmentCount | short    | BE     | Odd Lot Attachment Count     | §2.2.4.4
+    --------|-------|-------------------|----------|--------|------------------------------|--------
+    Total: 53 bytes (base)
+
+--- QUOTE APPENDAGES ---
+
+NationalBBOAppendageShortForm [§2.2.5.1]
+    @offset | @size | field_name        | type  | endian | description                  | source
+    --------|-------|-------------------|-------|--------|------------------------------|--------
+    0       | 1     | nbboQuoteCond     | byte  | n/a    | NBBO Quote Condition         | §2.2.5.1
+    1       | 1     | nbBidMarketCenter | byte  | n/a    | National Best Bid MC         | §2.2.5.1
+    2       | 2     | nbBidPrice        | short | BE     | National Best Bid Price      | §2.2.5.1
+    4       | 2     | nbBidSize         | short | BE     | National Best Bid Size       | §2.2.5.1
+    6       | 1     | nbAskMarketCenter | byte  | n/a    | National Best Ask MC         | §2.2.5.1
+    7       | 2     | nbAskPrice        | short | BE     | National Best Ask Price      | §2.2.5.1
+    9       | 2     | nbAskSize         | short | BE     | National Best Ask Size       | §2.2.5.1
+    --------|-------|-------------------|-------|--------|------------------------------|--------
+    Total: 11 bytes
+
+NationalBBOAppendageLongForm [§2.2.5.2]
+    @offset | @size | field_name        | type | endian | description                  | source
+    --------|-------|-------------------|------|--------|------------------------------|--------
+    0       | 1     | nbboQuoteCond     | byte | n/a    | NBBO Quote Condition         | §2.2.5.2
+    1       | 1     | nbBidMarketCenter | byte | n/a    | National Best Bid MC         | §2.2.5.2
+    2       | 8     | nbBidPrice        | long | BE     | National Best Bid Price      | §2.2.5.2
+    10      | 4     | nbBidSize         | int  | BE     | National Best Bid Size       | §2.2.5.2
+    14      | 1     | nbAskMarketCenter | byte | n/a    | National Best Ask MC         | §2.2.5.2
+    15      | 8     | nbAskPrice        | long | BE     | National Best Ask Price      | §2.2.5.2
+    23      | 4     | nbAskSize         | int  | BE     | National Best Ask Size       | §2.2.5.2
+    --------|-------|-------------------|------|--------|------------------------------|--------
+    Total: 27 bytes
+
+FINRAADFMPIDAppendage [§2.2.6]
+    @offset | @size | field_name | type    | endian | description        | source
+    --------|-------|------------|---------|--------|--------------------|--------
+    0       | 4     | bidAdfMpid | byte[4] | n/a    | Bid ADF MPID       | §2.2.6
+    4       | 4     | askAdfMpid | byte[4] | n/a    | Ask ADF MPID       | §2.2.6
+    --------|-------|------------|---------|--------|--------------------|--------
+    Total: 8 bytes
+
+BOLOAppendageShortForm [§2.2.7.1]
+    @offset | @size | field_name        | type  | endian | description             | source
+    --------|-------|-------------------|-------|--------|-------------------------|--------
+    0       | 1     | olBidMarketCenter | byte  | n/a    | BOLO Best Bid MC        | §2.2.7.1
+    1       | 2     | olBidPrice        | short | BE     | BOLO Bid Price          | §2.2.7.1
+    3       | 2     | olBidSize         | short | BE     | BOLO Bid Size           | §2.2.7.1
+    5       | 1     | olAskMarketCenter | byte  | n/a    | BOLO Best Ask MC        | §2.2.7.1
+    6       | 2     | olAskPrice        | short | BE     | BOLO Ask Price          | §2.2.7.1
+    8       | 2     | olAskSize         | short | BE     | BOLO Ask Size           | §2.2.7.1
+    --------|-------|-------------------|-------|--------|-------------------------|--------
+    Total: 10 bytes
+
+BOLOAppendageLongForm [§2.2.7.2]
+    @offset | @size | field_name        | type  | endian | description             | source
+    --------|-------|-------------------|-------|--------|-------------------------|--------
+    0       | 1     | olBidMarketCenter | byte  | n/a    | BOLO Best Bid MC        | §2.2.7.2
+    1       | 8     | olBidPrice        | long  | BE     | BOLO Bid Price          | §2.2.7.2
+    9       | 2     | olBidSize         | short | BE     | BOLO Bid Size           | §2.2.7.2
+    11      | 1     | olAskMarketCenter | byte  | n/a    | BOLO Best Ask MC        | §2.2.7.2
+    12      | 8     | olAskPrice        | long  | BE     | BOLO Ask Price          | §2.2.7.2
+    20      | 2     | olAskSize         | short | BE     | BOLO Ask Size           | §2.2.7.2
+    --------|-------|-------------------|-------|--------|-------------------------|--------
+    Total: 22 bytes
+
+BOLOAppendageMPIDForm [§2.2.7.3]
+    @offset | @size | field_name        | type    | endian | description             | source
+    --------|-------|-------------------|---------|--------|-------------------------|--------
+    0       | 1     | olBidMarketCenter | byte    | n/a    | BOLO Best Bid MC        | §2.2.7.3
+    1       | 8     | olBidPrice        | long    | BE     | BOLO Bid Price          | §2.2.7.3
+    9       | 2     | olBidSize         | short   | BE     | BOLO Bid Size           | §2.2.7.3
+    11      | 1     | olAskMarketCenter | byte    | n/a    | BOLO Best Ask MC        | §2.2.7.3
+    12      | 8     | olAskPrice        | long    | BE     | BOLO Ask Price          | §2.2.7.3
+    20      | 2     | olAskSize         | short   | BE     | BOLO Ask Size           | §2.2.7.3
+    22      | 4     | olBidMpid         | byte[4] | n/a    | BOLO Best Bid MPID      | §2.2.7.3
+    26      | 4     | olAskMpid         | byte[4] | n/a    | BOLO Best Ask MPID      | §2.2.7.3
+    --------|-------|-------------------|---------|--------|-------------------------|--------
+    Total: 30 bytes
+
+--- ODD LOT ATTACHMENTS ---
+
+OddLotPriceLevelAttachmentShortForm [§2.2.8.1]
+    @offset | @size | field_name | type  | endian | description             | source
+    --------|-------|------------|-------|--------|-------------------------|--------
+    0       | 1     | olMCID     | byte  | n/a    | Market Center ID        | §2.2.8.1
+    1       | 1     | olSide     | byte  | n/a    | Side                    | §2.2.8.1
+    2       | 2     | olPrice    | short | BE     | Odd Lot Price           | §2.2.8.1
+    4       | 2     | olSize     | short | BE     | Shares at Odd Lot Price | §2.2.8.1
+    --------|-------|------------|-------|--------|-------------------------|--------
+    Total: 6 bytes (per price level)
+
+OddLotPriceLevelAttachmentLongForm [§2.2.8.2]
+    @offset | @size | field_name | type  | endian | description             | source
+    --------|-------|------------|-------|--------|-------------------------|--------
+    0       | 1     | olMCID     | byte  | n/a    | Market Center ID        | §2.2.8.2
+    1       | 1     | olSide     | byte  | n/a    | Side                    | §2.2.8.2
+    2       | 8     | olPrice    | long  | BE     | Odd Lot Price           | §2.2.8.2
+    10      | 2     | olSize     | short | BE     | Shares at Odd Lot Price | §2.2.8.2
+    --------|-------|------------|-------|--------|-------------------------|--------
+    Total: 12 bytes (per price level)
+
+OddLotPriceLevelAttachmentADFMPIDForm [§2.2.8.3]
+    @offset | @size | field_name | type    | endian | description             | source
+    --------|-------|------------|---------|--------|-------------------------|--------
+    0       | 1     | olMCID     | byte    | n/a    | Market Center ID        | §2.2.8.3
+    1       | 1     | olSide     | byte    | n/a    | Side                    | §2.2.8.3
+    2       | 8     | olPrice    | long    | BE     | Odd Lot Price           | §2.2.8.3
+    10      | 2     | olSize     | short   | BE     | Shares at Odd Lot Price | §2.2.8.3
+    12      | 4     | olMpid     | byte[4] | n/a    | ADF MPID (blank if !D)  | §2.2.8.3
+    --------|-------|------------|---------|--------|-------------------------|--------
+    Total: 16 bytes (per price level)
+
+    Notes: [§2.2.8]
+    - olPrice=0 and olSize=0 indicates removal of that price level
+    - Repeat olAttachmentCount times
+
+=== TRADE MESSAGES (msgCategory = 'T') ===
+
+TradeReportMessageShortForm (TM) [§2.3.1]
+    @offset | @size | field_name         | type    | endian | description                  | source
+    --------|-------|--------------------|---------|--------|------------------------------|--------
+    0       | 1     | version            | byte    | n/a    | '1' - Protocol Version       | §2.3.1
+    1       | 1     | msgCategory        | byte    | n/a    | 'T' - Trade Messages         | §2.3.1
+    2       | 1     | msgType            | byte    | n/a    | 'M' - Short Trade Report     | §2.3.1
+    3       | 1     | orig               | byte    | n/a    | Market Center Originator ID  | §2.3.1
+    4       | 1     | subMarketId        | byte    | n/a    | Sub Market Center ID         | §2.3.1
+    5       | 8     | sipTime            | long    | BE     | SIP Timestamp                | §2.3.1
+    13      | 8     | timestamp1         | long    | BE     | Participant Timestamp        | §2.3.1
+    21      | 8     | partToken          | long    | BE     | Participant Token            | §2.3.1
+    29      | 8     | timestamp2         | long    | BE     | FINRA Timestamp              | §2.3.1
+    37      | 5     | symbol             | byte[5] | n/a    | Security Identifier          | §2.3.1
+    42      | 8     | tradeId            | long    | BE     | Trade Id                     | §2.3.1
+    50      | 2     | price              | short   | BE     | Trade Price (2 decimals)     | §2.3.1
+    52      | 8     | volume             | long    | BE     | Trade Volume (6 decimals)    | §2.3.1
+    60      | 4     | cond               | byte[4] | n/a    | Sale Condition               | §2.3.1, §3.14
+    64      | 1     | tradeThrExempt     | byte    | n/a    | Trade Through Exempt Flag    | §2.3.1, §3.13
+    65      | 1     | consPriceChangeInd | byte    | n/a    | Consolidated Price Change    | §2.3.1, §3.10
+    66      | 1     | partPriceChangeInd | byte    | n/a    | Participant Price Change     | §2.3.1, §3.11
+    --------|-------|--------------------|---------|--------|------------------------------|--------
+    Total: 67 bytes
+
+    Constraints: [§2.3.1]
+    - Symbol 5 characters or less
+    - Trade price max $655.35
+    - Trade price uses only 2 decimal precision
+    - Sale condition NOT equal to 'R' (Seller)
+
+TradeReportMessageLongForm (TN) [§2.3.2]
+    @offset | @size | field_name         | type     | endian | description                  | source
+    --------|-------|--------------------| ---------|--------|------------------------------|--------
+    0       | 1     | version            | byte     | n/a    | '1' - Protocol Version       | §2.3.2
+    1       | 1     | msgCategory        | byte     | n/a    | 'T' - Trade Messages         | §2.3.2
+    2       | 1     | msgType            | byte     | n/a    | 'N' - Long Trade Report      | §2.3.2
+    3       | 1     | orig               | byte     | n/a    | Market Center Originator ID  | §2.3.2
+    4       | 1     | subMarketId        | byte     | n/a    | Sub Market Center ID         | §2.3.2
+    5       | 8     | sipTime            | long     | BE     | SIP Timestamp                | §2.3.2
+    13      | 8     | timestamp1         | long     | BE     | Participant Timestamp        | §2.3.2
+    21      | 8     | partToken          | long     | BE     | Participant Token            | §2.3.2
+    29      | 8     | timestamp2         | long     | BE     | FINRA Timestamp              | §2.3.2
+    37      | 11    | symbol             | byte[11] | n/a    | Security Identifier          | §2.3.2
+    48      | 8     | tradeId            | long     | BE     | Trade Id                     | §2.3.2
+    56      | 8     | price              | long     | BE     | Trade Price (6 decimals)     | §2.3.2
+    64      | 8     | volume             | long     | BE     | Trade Volume (6 decimals)    | §2.3.2
+    72      | 4     | trcond             | byte[4]  | n/a    | Sale Condition               | §2.3.2, §3.14
+    76      | 1     | tradeThrExempt     | byte     | n/a    | Trade Through Exempt Flag    | §2.3.2, §3.13
+    77      | 2     | saleDays           | short    | BE     | Seller's Sale Days           | §2.3.2
+    79      | 1     | consPriceChangeInd | byte     | n/a    | Consolidated Price Change    | §2.3.2, §3.10
+    80      | 1     | partPriceChangeInd | byte     | n/a    | Participant Price Change     | §2.3.2, §3.11
+    --------|-------|--------------------| ---------|--------|------------------------------|--------
+    Total: 81 bytes
+
+    Notes: [§2.3.2]
+    - saleDays only valid when sale condition = 'R' (Seller); otherwise 0
+
+TradeCancelErrorMessage (TO) [§2.3.3]
+    @offset | @size | field_name         | type     | endian | description                  | source
+    --------|-------|--------------------|----------|--------|------------------------------|--------
+    0       | 1     | version            | byte     | n/a    | '1' - Protocol Version       | §2.3.3
+    1       | 1     | msgCategory        | byte     | n/a    | 'T' - Trade Messages         | §2.3.3
+    2       | 1     | msgType            | byte     | n/a    | 'O' - Trade Cancel/Error     | §2.3.3
+    3       | 1     | orig               | byte     | n/a    | Market Center Originator ID  | §2.3.3
+    4       | 1     | subMarketId        | byte     | n/a    | Sub Market Center ID         | §2.3.3
+    5       | 8     | sipTime            | long     | BE     | SIP Timestamp                | §2.3.3
+    13      | 8     | timestamp1         | long     | BE     | Participant Timestamp        | §2.3.3
+    21      | 8     | partToken          | long     | BE     | Participant Token            | §2.3.3
+    29      | 8     | timestamp2         | long     | BE     | FINRA Timestamp              | §2.3.3
+    37      | 11    | symbol             | byte[11] | n/a    | Security Identifier          | §2.3.3
+    48      | 1     | cancelType         | byte     | n/a    | Trade Cancellation Type      | §2.3.3, §3.15
+    49      | 8     | origTradeId        | long     | BE     | Original Trade Id            | §2.3.3
+    57      | 8     | origPrice          | long     | BE     | Original Trade Price         | §2.3.3
+    65      | 8     | origVolume         | long     | BE     | Original Volume (6 decimals) | §2.3.3
+    73      | 4     | origCond           | byte[4]  | n/a    | Original Sale Condition      | §2.3.3
+    77      | 1     | origTradeThrExempt | byte     | n/a    | Original Trade Through Exempt| §2.3.3
+    78      | 2     | origSaleDays       | short    | BE     | Original Seller's Sale Days  | §2.3.3
+    80      | 8     | consHighPrice      | long     | BE     | Consolidated High Price      | §2.3.3
+    88      | 8     | consLowPrice       | long     | BE     | Consolidated Low Price       | §2.3.3
+    96      | 8     | consLastPrice      | long     | BE     | Consolidated Last Price      | §2.3.3
+    104     | 8     | consVolume         | long     | BE     | Consolidated Volume (6 dec)  | §2.3.3
+    112     | 1     | consPriceChangeInd | byte     | n/a    | Consolidated Price Change    | §2.3.3
+    113     | 1     | consLastPriceOrig  | byte     | n/a    | MC Originator ID for Last    | §2.3.3
+    114     | 8     | partHighPrice      | long     | BE     | Participant High Price       | §2.3.3
+    122     | 8     | partLowPrice       | long     | BE     | Participant Low Price        | §2.3.3
+    130     | 8     | partLastPrice      | long     | BE     | Participant Last Price       | §2.3.3
+    138     | 8     | partVolume         | long     | BE     | Participant Volume (6 dec)   | §2.3.3
+    --------|-------|--------------------|----------|--------|------------------------------|--------
+    Total: 146 bytes
+
+TradeCorrectionMessage (TP) [§2.3.4]
+    @offset | @size | field_name         | type     | endian | description                  | source
+    --------|-------|--------------------|----------|--------|------------------------------|--------
+    0       | 1     | version            | byte     | n/a    | '1' - Protocol Version       | §2.3.4
+    1       | 1     | msgCategory        | byte     | n/a    | 'T' - Trade Messages         | §2.3.4
+    2       | 1     | msgType            | byte     | n/a    | 'P' - Trade Correction       | §2.3.4
+    3       | 1     | orig               | byte     | n/a    | Market Center Originator ID  | §2.3.4
+    4       | 1     | subMarketId        | byte     | n/a    | Sub Market Center ID         | §2.3.4
+    5       | 8     | sipTime            | long     | BE     | SIP Timestamp                | §2.3.4
+    13      | 8     | timestamp1         | long     | BE     | Participant Timestamp        | §2.3.4
+    21      | 8     | partToken          | long     | BE     | Participant Token            | §2.3.4
+    29      | 8     | timestamp2         | long     | BE     | FINRA Timestamp              | §2.3.4
+    37      | 11    | symbol             | byte[11] | n/a    | Security Identifier          | §2.3.4
+    48      | 8     | origTradeId        | long     | BE     | Original Trade Id            | §2.3.4
+    56      | 8     | origPrice          | long     | BE     | Original Trade Price         | §2.3.4
+    64      | 8     | origVolume         | long     | BE     | Original Volume (6 decimals) | §2.3.4
+    72      | 4     | origCond           | byte[4]  | n/a    | Original Sale Condition      | §2.3.4
+    76      | 1     | origTradeThrExempt | byte     | n/a    | Original Trade Through Exempt| §2.3.4
+    77      | 2     | origSaleDays       | short    | BE     | Original Seller's Sale Days  | §2.3.4
+    79      | 8     | corrTradeId        | long     | BE     | Corrected Trade Id           | §2.3.4
+    87      | 8     | corrPrice          | long     | BE     | Corrected Trade Price        | §2.3.4
+    95      | 8     | corrVolume         | long     | BE     | Corrected Volume (6 decimals)| §2.3.4
+    103     | 4     | corrCond           | byte[4]  | n/a    | Corrected Sale Condition     | §2.3.4
+    107     | 1     | corrTradeThrExempt | byte     | n/a    | Corrected Trade Through Exmpt| §2.3.4
+    108     | 2     | corrSaleDays       | short    | BE     | Corrected Seller's Sale Days | §2.3.4
+    110     | 8     | consHighPrice      | long     | BE     | Consolidated High Price      | §2.3.4
+    118     | 8     | consLowPrice       | long     | BE     | Consolidated Low Price       | §2.3.4
+    126     | 8     | consLastPrice      | long     | BE     | Consolidated Last Price      | §2.3.4
+    134     | 8     | consVolume         | long     | BE     | Consolidated Volume          | §2.3.4
+    142     | 1     | consPriceChangeInd | byte     | n/a    | Consolidated Price Change    | §2.3.4
+    143     | 1     | consLastPriceOrig  | byte     | n/a    | MC Originator ID             | §2.3.4
+    144     | 8     | partHighPrice      | long     | BE     | Participant High Price       | §2.3.4
+    152     | 8     | partLowPrice       | long     | BE     | Participant Low Price        | §2.3.4
+    160     | 8     | partLastPrice      | long     | BE     | Participant Last Price       | §2.3.4
+    168     | 8     | partVolume         | long     | BE     | Participant Volume           | §2.3.4
+    --------|-------|--------------------|----------|--------|------------------------------|--------
+    Total: 176 bytes
+
+PriorDayAsOfTradeMessage (TQ) [§2.3.5]
+    @offset | @size | field_name     | type     | endian | description                  | source
+    --------|-------|----------------|----------|--------|------------------------------|--------
+    0       | 1     | version        | byte     | n/a    | '1' - Protocol Version       | §2.3.5
+    1       | 1     | msgCategory    | byte     | n/a    | 'T' - Trade Messages         | §2.3.5
+    2       | 1     | msgType        | byte     | n/a    | 'Q' - As-Of Trade            | §2.3.5
+    3       | 1     | orig           | byte     | n/a    | Market Center Originator ID  | §2.3.5
+    4       | 1     | subMarketId    | byte     | n/a    | Sub Market Center ID         | §2.3.5
+    5       | 8     | sipTime        | long     | BE     | SIP Timestamp                | §2.3.5
+    13      | 8     | timestamp1     | long     | BE     | Participant Timestamp        | §2.3.5
+    21      | 8     | partToken      | long     | BE     | Participant Token            | §2.3.5
+    29      | 8     | timestamp2     | long     | BE     | FINRA Timestamp              | §2.3.5
+    37      | 11    | symbol         | byte[11] | n/a    | Security Identifier          | §2.3.5
+    48      | 8     | tradeId        | long     | BE     | Trade Id (pass-through)      | §2.3.5
+    56      | 8     | price          | long     | BE     | Trade Price                  | §2.3.5
+    64      | 8     | volume         | long     | BE     | Trade Volume (6 decimals)    | §2.3.5
+    72      | 4     | cond           | byte[4]  | n/a    | Sale Condition               | §2.3.5
+    76      | 1     | tradeThrExempt | byte     | n/a    | Trade Through Exempt Flag    | §2.3.5
+    77      | 2     | saleDays       | short    | BE     | Seller's Sale Days           | §2.3.5
+    79      | 1     | asOfAction     | byte     | n/a    | As-Of Action                 | §2.3.5, §3.16
+    80      | 8     | priorTime      | long     | BE     | Timestamp of Trade           | §2.3.5
+    --------|-------|----------------|----------|--------|------------------------------|--------
+    Total: 88 bytes
+
+    Notes: [§2.3.5]
+    - tradeId is pass-through; no uniqueness guarantee; may be 0
+
+=== ADMINISTRATIVE MESSAGES (msgCategory = 'A' or 'V') ===
+
+GeneralAdministrativeMessage (AA) [§2.4.1.1]
+    @offset | @size | field_name  | type      | endian | description                  | source
+    --------|-------|-------------|-----------|--------|------------------------------|--------
+    0       | 1     | version     | byte      | n/a    | '1' - Protocol Version       | §2.4.1.1
+    1       | 1     | msgCategory | byte      | n/a    | 'A' - Administrative         | §2.4.1.1
+    2       | 1     | msgType     | byte      | n/a    | 'A' - General Administrative | §2.4.1.1
+    3       | 1     | orig        | byte      | n/a    | Market Center Originator ID  | §2.4.1.1
+    4       | 1     | subMarketId | byte      | n/a    | Sub Market Center ID         | §2.4.1.1
+    5       | 8     | sipTime     | long      | BE     | SIP Timestamp                | §2.4.1.1
+    13      | 8     | timestamp1  | long      | BE     | Participant Timestamp        | §2.4.1.1
+    21      | 8     | partToken   | long      | BE     | Participant Token            | §2.4.1.1
+    29      | 2     | textLen     | short     | BE     | Text Length                  | §2.4.1.1
+    31      | var   | text        | varbyte[] | n/a    | Text (length = textLen)      | §2.4.1.1
+    --------|-------|-------------|-----------|--------|------------------------------|--------
+    Total: 31 + textLen bytes
+
+CrossSROTradingActionMessage (AH) [§2.4.1.2]
+    @offset | @size | field_name     | type     | endian | description                  | source
+    --------|-------|----------------|----------|--------|------------------------------|--------
+    0       | 1     | version        | byte     | n/a    | '1' - Protocol Version       | §2.4.1.2
+    1       | 1     | msgCategory    | byte     | n/a    | 'A' - Administrative         | §2.4.1.2
+    2       | 1     | msgType        | byte     | n/a    | 'H' - Trading Action         | §2.4.1.2
+    3       | 1     | orig           | byte     | n/a    | Market Center Originator ID  | §2.4.1.2
+    4       | 1     | subMarketId    | byte     | n/a    | Sub Market Center ID         | §2.4.1.2
+    5       | 8     | sipTime        | long     | BE     | SIP Timestamp                | §2.4.1.2
+    13      | 8     | timestamp1     | long     | BE     | Participant Timestamp        | §2.4.1.2
+    21      | 8     | partToken      | long     | BE     | Participant Token            | §2.4.1.2
+    29      | 11    | symbol         | byte[11] | n/a    | Security Identifier          | §2.4.1.2
+    40      | 1     | action         | byte     | n/a    | Trading Action Code          | §2.4.1.2, §3.18
+    41      | 4     | actionSequence | int      | BE     | Trading Action Seq Number    | §2.4.1.2
+    45      | 8     | actionTime     | long     | BE     | Timestamp of action          | §2.4.1.2
+    53      | 6     | reason         | byte[6]  | n/a    | Reason for Trading Action    | §2.4.1.2, §3.17
+    --------|-------|----------------|----------|--------|------------------------------|--------
+    Total: 59 bytes
+
+    Notes: [§2.4.1.2]
+    - actionSequence is for internal use; recipients should ignore
+
+MarketCenterTradingActionMessage (AK) [§2.4.1.3]
+    @offset | @size | field_name | type     | endian | description                  | source
+    --------|-------|------------|----------|--------|------------------------------|--------
+    0       | 1     | version    | byte     | n/a    | '1' - Protocol Version       | §2.4.1.3
+    1       | 1     | msgCategory| byte     | n/a    | 'A' - Administrative         | §2.4.1.3
+    2       | 1     | msgType    | byte     | n/a    | 'K' - MC Trading Action      | §2.4.1.3
+    3       | 1     | orig       | byte     | n/a    | Market Center Originator ID  | §2.4.1.3
+    4       | 1     | subMarketId| byte     | n/a    | Sub Market Center ID         | §2.4.1.3
+    5       | 8     | sipTime    | long     | BE     | SIP Timestamp                | §2.4.1.3
+    13      | 8     | timestamp1 | long     | BE     | Participant Timestamp        | §2.4.1.3
+    21      | 8     | partToken  | long     | BE     | Participant Token            | §2.4.1.3
+    29      | 11    | symbol     | byte[11] | n/a    | Security Identifier          | §2.4.1.3
+    40      | 1     | action     | byte     | n/a    | Trading Action Code          | §2.4.1.3, §3.18
+    41      | 8     | actionTime | long     | BE     | Timestamp of action          | §2.4.1.3
+    49      | 1     | mcId       | byte     | n/a    | Market Center Identifier     | §2.4.1.3
+    --------|-------|------------|----------|--------|------------------------------|--------
+    Total: 50 bytes
+
+IssueSymbolDirectoryMessage (AB) [§2.4.1.4]
+    @offset | @size | field_name | type     | endian | description                  | source
+    --------|-------|------------|----------|--------|------------------------------|--------
+    0       | 1     | version    | byte     | n/a    | '1' - Protocol Version       | §2.4.1.4
+    1       | 1     | msgCategory| byte     | n/a    | 'A' - Administrative         | §2.4.1.4
+    2       | 1     | msgType    | byte     | n/a    | 'B' - Issue Symbol Directory | §2.4.1.4
+    3       | 1     | orig       | byte     | n/a    | Market Center Originator ID  | §2.4.1.4
+    4       | 1     | subMarketId| byte     | n/a    | Sub Market Center ID         | §2.4.1.4
+    5       | 8     | sipTime    | long     | BE     | SIP Timestamp                | §2.4.1.4
+    13      | 8     | timestamp1 | long     | BE     | Participant Timestamp        | §2.4.1.4
+    21      | 8     | partToken  | long     | BE     | Participant Token            | §2.4.1.4
+    29      | 11    | symbol     | byte[11] | n/a    | Security Identifier          | §2.4.1.4
+    40      | 11    | oldSymbol  | byte[11] | n/a    | Old Security Identifier      | §2.4.1.4
+    51      | 30    | name       | byte[30] | n/a    | Issue Name                   | §2.4.1.4
+    81      | 1     | type       | byte     | n/a    | Issue Type                   | §2.4.1.4, §3.23
+    82      | 2     | subtype    | byte[2]  | n/a    | Issue Subtype                | §2.4.1.4, §3.24
+    84      | 1     | mktTier    | byte     | n/a    | Market Tier                  | §2.4.1.4, §3.25
+    85      | 1     | auth       | byte     | n/a    | Authenticity                 | §2.4.1.4, §3.22
+    86      | 1     | sstInd     | byte     | n/a    | Short Sale Threshold Ind     | §2.4.1.4, §3.26
+    87      | 2     | roundLotSz | short    | BE     | Round Lot Size               | §2.4.1.4, §3.32
+    89      | 1     | finStatInd | byte     | n/a    | Financial Status Indicator   | §2.4.1.4, §3.27
+    --------|-------|------------|----------|--------|------------------------------|--------
+    Total: 90 bytes
+
+RegSHOShortSaleRestrictionIndicatorMessage (AV) [§2.4.1.5]
+    @offset | @size | field_name  | type     | endian | description                  | source
+    --------|-------|-------------|----------|--------|------------------------------|--------
+    0       | 1     | version     | byte     | n/a    | '1' - Protocol Version       | §2.4.1.5
+    1       | 1     | msgCategory | byte     | n/a    | 'A' - Administrative         | §2.4.1.5
+    2       | 1     | msgType     | byte     | n/a    | 'V' - Reg SHO Restriction    | §2.4.1.5
+    3       | 1     | orig        | byte     | n/a    | Market Center Originator ID  | §2.4.1.5
+    4       | 1     | subMarketId | byte     | n/a    | Sub Market Center ID         | §2.4.1.5
+    5       | 8     | sipTime     | long     | BE     | SIP Timestamp                | §2.4.1.5
+    13      | 8     | timestamp1  | long     | BE     | Participant Timestamp        | §2.4.1.5
+    21      | 8     | partToken   | long     | BE     | Participant Token            | §2.4.1.5
+    29      | 11    | symbol      | byte[11] | n/a    | Security Identifier          | §2.4.1.5
+    40      | 1     | regShoAction| byte     | n/a    | Reg SHO Action               | §2.4.1.5, §3.12
+    --------|-------|-------------|----------|--------|------------------------------|--------
+    Total: 41 bytes
+
+LULDPriceBandMessage (AP) [§2.4.1.6]
+    @offset | @size | field_name       | type     | endian | description                  | source
+    --------|-------|------------------|----------|--------|------------------------------|--------
+    0       | 1     | version          | byte     | n/a    | '1' - Protocol Version       | §2.4.1.6
+    1       | 1     | msgCategory      | byte     | n/a    | 'A' - Administrative         | §2.4.1.6
+    2       | 1     | msgType          | byte     | n/a    | 'P' - LULD Price Band        | §2.4.1.6
+    3       | 1     | orig             | byte     | n/a    | Market Center Originator ID  | §2.4.1.6
+    4       | 1     | subMarketId      | byte     | n/a    | Sub Market Center ID         | §2.4.1.6
+    5       | 8     | sipTime          | long     | BE     | SIP Timestamp                | §2.4.1.6
+    13      | 8     | timestamp1       | long     | BE     | Participant Timestamp        | §2.4.1.6
+    21      | 8     | partToken        | long     | BE     | Participant Token            | §2.4.1.6
+    29      | 11    | symbol           | byte[11] | n/a    | Security Identifier          | §2.4.1.6
+    40      | 1     | luldPriceBandInd | byte     | n/a    | LULD Price Band Indicator    | §2.4.1.6, §3.28
+    41      | 8     | luldTime         | long     | BE     | LULD Band Effective Time     | §2.4.1.6
+    49      | 8     | limitDownPrice   | long     | BE     | Limit Down Price             | §2.4.1.6
+    57      | 8     | limitUpPrice     | long     | BE     | Limit Up Price               | §2.4.1.6
+    --------|-------|------------------|----------|--------|------------------------------|--------
+    Total: 65 bytes
+
+MWCBDeclineLevelMessage (AC) [§2.4.1.7]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.4.1.7
+    1       | 1     | msgCategory | byte | n/a    | 'A' - Administrative         | §2.4.1.7
+    2       | 1     | msgType     | byte | n/a    | 'C' - MWCB Decline           | §2.4.1.7
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.4.1.7
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.4.1.7
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.4.1.7
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.4.1.7
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.4.1.7
+    29      | 8     | mwcbLevel1  | long | BE     | MWCB Level 1 (7%)            | §2.4.1.7
+    37      | 8     | mwcbLevel2  | long | BE     | MWCB Level 2 (13%)           | §2.4.1.7
+    45      | 8     | mwcbLevel3  | long | BE     | MWCB Level 3 (20%)           | §2.4.1.7
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 53 bytes
+
+MWCBStatusMessage (AD) [§2.4.1.8]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.4.1.8
+    1       | 1     | msgCategory | byte | n/a    | 'A' - Administrative         | §2.4.1.8
+    2       | 1     | msgType     | byte | n/a    | 'D' - MWCB Status            | §2.4.1.8
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.4.1.8
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.4.1.8
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.4.1.8
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.4.1.8
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.4.1.8
+    29      | 1     | mwcbStatus  | byte | n/a    | MWCB Status Level Indicator  | §2.4.1.8, §3.29
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 30 bytes
+
+AuctionCollarMessage (AE) [§2.4.1.9]
+    @offset | @size | field_name          | type     | endian | description                  | source
+    --------|-------|---------------------|----------|--------|------------------------------|--------
+    0       | 1     | version             | byte     | n/a    | '1' - Protocol Version       | §2.4.1.9
+    1       | 1     | msgCategory         | byte     | n/a    | 'A' - Administrative         | §2.4.1.9
+    2       | 1     | msgType             | byte     | n/a    | 'E' - Auction Collar         | §2.4.1.9
+    3       | 1     | orig                | byte     | n/a    | Market Center Originator ID  | §2.4.1.9
+    4       | 1     | subMarketId         | byte     | n/a    | Sub Market Center ID         | §2.4.1.9
+    5       | 8     | sipTime             | long     | BE     | SIP Timestamp                | §2.4.1.9
+    13      | 8     | timestamp1          | long     | BE     | Participant Timestamp        | §2.4.1.9
+    21      | 8     | partToken           | long     | BE     | Participant Token            | §2.4.1.9
+    29      | 11    | symbol              | byte[11] | n/a    | Security Identifier          | §2.4.1.9
+    40      | 4     | actionSequence      | int      | BE     | Trading Action Seq Number    | §2.4.1.9
+    44      | 8     | collarReferencePrice| long     | BE     | Reference price for collar   | §2.4.1.9
+    52      | 8     | collarUpPrice       | long     | BE     | Collar Up Price              | §2.4.1.9
+    60      | 8     | collarDownPrice     | long     | BE     | Collar Down Price            | §2.4.1.9
+    68      | 1     | collarExtension     | byte     | n/a    | Collar Extension (0-255)     | §2.4.1.9
+    --------|-------|---------------------|----------|--------|------------------------------|--------
+    Total: 69 bytes
+
+    Notes: [§2.4.1.9]
+    - Published after LULD Trading Pause
+    - collarExtension starts at 0, increments each update
+    - Reset to 0 on new pause event
+
+ClosingTradeSummaryReportMessage (AU) [§2.4.2.1]
+    @offset | @size | field_name        | type     | endian | description                  | source
+    --------|-------|-------------------|----------|--------|------------------------------|--------
+    0       | 1     | version           | byte     | n/a    | '1' - Protocol Version       | §2.4.2.1
+    1       | 1     | msgCategory       | byte     | n/a    | 'A' - Administrative         | §2.4.2.1
+    2       | 1     | msgType           | byte     | n/a    | 'U' - Closing Trade Summary  | §2.4.2.1
+    3       | 1     | orig              | byte     | n/a    | Market Center Originator ID  | §2.4.2.1
+    4       | 1     | subMarketId       | byte     | n/a    | Sub Market Center ID         | §2.4.2.1
+    5       | 8     | sipTime           | long     | BE     | SIP Timestamp                | §2.4.2.1
+    13      | 8     | timestamp1        | long     | BE     | Participant Timestamp        | §2.4.2.1
+    21      | 8     | partToken         | long     | BE     | Participant Token            | §2.4.2.1
+    29      | 11    | symbol            | byte[11] | n/a    | Security Identifier          | §2.4.2.1
+    40      | 8     | dailyConsHighPrice| long     | BE     | Daily Consolidated High      | §2.4.2.1
+    48      | 8     | dailyConsLowPrice | long     | BE     | Daily Consolidated Low       | §2.4.2.1
+    56      | 8     | dailyConsClosePrice| long    | BE     | Daily Consolidated Close     | §2.4.2.1
+    64      | 1     | consLastPriceOrig | byte     | n/a    | Market Center Originator ID  | §2.4.2.1
+    65      | 8     | consVolume        | long     | BE     | Consolidated Volume (6 dec)  | §2.4.2.1
+    73      | 1     | tradeActionInd    | byte     | n/a    | Trading Action Indicator     | §2.4.2.1, §3.20
+    74      | 2     | numMktCenterAttch | short    | BE     | Num MC Attachments           | §2.4.2.1
+    --------|-------|-------------------|----------|--------|------------------------------|--------
+    Total: 76 bytes + (numMktCenterAttch * 34 bytes)
+
+    MarketCenterClosingPriceVolumeAttachment [§2.4.2.1]
+    @offset | @size | field_name    | type | endian | description                  | source
+    --------|-------|---------------|------|--------|------------------------------|--------
+    0       | 1     | mcId          | byte | n/a    | Market Center Identifier     | §2.4.2.1
+    1       | 8     | mcClosingPrice| long | BE     | Market Center Closing Price  | §2.4.2.1
+    9       | 8     | mcVolume      | long | BE     | Market Center Volume (6 dec) | §2.4.2.1
+    17      | 1     | mcCloseInd    | byte | n/a    | Market Center Close Ind      | §2.4.2.1, §3.19
+    18      | 8     | partHighPrice | long | BE     | Participant High Price       | §2.4.2.1
+    26      | 8     | partLowPrice  | long | BE     | Participant Low Price        | §2.4.2.1
+    --------|-------|---------------|------|--------|------------------------------|--------
+    Total: 34 bytes (per attachment)
+
+TotalConsolidatedMarketCenterVolumeMessage (VV) [§2.4.2.2]
+    @offset | @size | field_name       | type  | endian | description                  | source
+    --------|-------|------------------|-------|--------|------------------------------|--------
+    0       | 1     | version          | byte  | n/a    | '1' - Protocol Version       | §2.4.2.2
+    1       | 1     | msgCategory      | byte  | n/a    | 'V' - Administrative         | §2.4.2.2
+    2       | 1     | msgType          | byte  | n/a    | 'V' - Total Volume           | §2.4.2.2
+    3       | 1     | orig             | byte  | n/a    | Market Center Originator ID  | §2.4.2.2
+    4       | 1     | subMarketId      | byte  | n/a    | Sub Market Center ID         | §2.4.2.2
+    5       | 8     | sipTime          | long  | BE     | SIP Timestamp                | §2.4.2.2
+    13      | 8     | timestamp1       | long  | BE     | Participant Timestamp        | §2.4.2.2
+    21      | 8     | partToken        | long  | BE     | Participant Token            | §2.4.2.2
+    29      | 8     | totalConsVolume  | long  | BE     | Total Consolidated Vol (6dec)| §2.4.2.2
+    37      | 2     | numMktCenterAttch| short | BE     | Num MC Attachments           | §2.4.2.2
+    --------|-------|------------------|-------|--------|------------------------------|--------
+    Total: 39 bytes + (numMktCenterAttch * 9 bytes)
+
+    MarketCenterVolumeAttachment [§2.4.2.2]
+    @offset | @size | field_name | type | endian | description                  | source
+    --------|-------|------------|------|--------|------------------------------|--------
+    0       | 1     | mcId       | byte | n/a    | Market Center Identifier     | §2.4.2.2
+    1       | 8     | mcVolume   | long | BE     | Current MC Volume (6 dec)    | §2.4.2.2
+    --------|-------|------------|------|--------|------------------------------|--------
+    Total: 9 bytes (per attachment)
+
+SessionCloseRecapMessage (AR) [§2.4.3.1]
+    @offset | @size | field_name       | type     | endian | description                  | source
+    --------|-------|------------------|----------|--------|------------------------------|--------
+    0       | 1     | version          | byte     | n/a    | '1' - Protocol Version       | §2.4.3.1
+    1       | 1     | msgCategory      | byte     | n/a    | 'A' - Administrative         | §2.4.3.1
+    2       | 1     | msgType          | byte     | n/a    | 'R' - Session Close Recap    | §2.4.3.1
+    3       | 1     | orig             | byte     | n/a    | Market Center Originator ID  | §2.4.3.1
+    4       | 1     | subMarketId      | byte     | n/a    | Sub Market Center ID         | §2.4.3.1
+    5       | 8     | sipTime          | long     | BE     | SIP Timestamp                | §2.4.3.1
+    13      | 8     | timestamp1       | long     | BE     | Participant Timestamp        | §2.4.3.1
+    21      | 8     | partToken        | long     | BE     | Participant Token            | §2.4.3.1
+    29      | 11    | symbol           | byte[11] | n/a    | Security Identifier          | §2.4.3.1
+    40      | 1     | nbBidMarketCtr   | byte     | n/a    | National Best Bid MC         | §2.4.3.1
+    41      | 8     | nbBidPrice       | long     | BE     | National Best Bid Price      | §2.4.3.1
+    49      | 8     | nbBidSize        | long     | BE     | National Best Bid Size       | §2.4.3.1
+    57      | 1     | nbAskMarketCtr   | byte     | n/a    | National Best Ask MC         | §2.4.3.1
+    58      | 8     | nbAskPrice       | long     | BE     | National Best Ask Price      | §2.4.3.1
+    66      | 8     | nbAskSize        | long     | BE     | National Best Ask Size       | §2.4.3.1
+    74      | 1     | specialCond      | byte     | n/a    | Special Condition            | §2.4.3.1, §3.21
+    75      | 2     | numMktCenterAttch| short    | BE     | Num MC Attachments           | §2.4.3.1
+    --------|-------|------------------|----------|--------|------------------------------|--------
+    Total: 77 bytes + (numMktCenterAttch * 33 bytes)
+
+    MarketCenterCloseRecapAttachment [§2.4.3.1]
+    @offset | @size | field_name | type | endian | description                  | source
+    --------|-------|------------|------|--------|------------------------------|--------
+    0       | 1     | mcId       | byte | n/a    | Market Center Identifier     | §2.4.3.1
+    1       | 8     | bidPrice   | long | BE     | Market Center Bid Price      | §2.4.3.1
+    9       | 8     | bidSize    | long | BE     | Market Center Bid Size       | §2.4.3.1
+    17      | 8     | askPrice   | long | BE     | Market Center Ask Price      | §2.4.3.1
+    25      | 8     | askSize    | long | BE     | Market Center Ask Size       | §2.4.3.1
+    --------|-------|------------|------|--------|------------------------------|--------
+    Total: 33 bytes (per attachment)
+
+=== CONTROL MESSAGES (msgCategory = 'C') ===
+
+StartOfDayMessage (CI) [§2.5.1.1]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.1.1
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.1.1
+    2       | 1     | msgType     | byte | n/a    | 'I' - Start of Day           | §2.5.1.1
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.1.1
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.1.1
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.1.1
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.1.1
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.1.1
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+EndOfDayMessage (CJ) [§2.5.1.2]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.1.2
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.1.2
+    2       | 1     | msgType     | byte | n/a    | 'J' - End of Day             | §2.5.1.2
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.1.2
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.1.2
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.1.2
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.1.2
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.1.2
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+MarketSessionOpenMessage (CO) [§2.5.1.3]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.1.3
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.1.3
+    2       | 1     | msgType     | byte | n/a    | 'O' - Market Session Open    | §2.5.1.3
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.1.3
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.1.3
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.1.3
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.1.3
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.1.3
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+MarketSessionCloseMessage (CC) [§2.5.1.4]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.1.4
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.1.4
+    2       | 1     | msgType     | byte | n/a    | 'C' - Market Session Close   | §2.5.1.4
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.1.4
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.1.4
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.1.4
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.1.4
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.1.4
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+EndOfTransmissionsMessage (CZ) [§2.5.1.5]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.1.5
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.1.5
+    2       | 1     | msgType     | byte | n/a    | 'Z' - End of Transmissions   | §2.5.1.5
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.1.5
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.1.5
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.1.5
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.1.5
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.1.5
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+    Notes: [§2.5.1.5]
+    - Last message of the day
+
+EndOfTradeReportingMessage (CX) [§2.5.2.1]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.2.1
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.2.1
+    2       | 1     | msgType     | byte | n/a    | 'X' - End of Trade Reporting | §2.5.2.1
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.2.1
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.2.1
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.2.1
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.2.1
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.2.1
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+EndOfConsolidatedLastSaleEligibilityMessage (CS) [§2.5.2.2]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.2.2
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.2.2
+    2       | 1     | msgType     | byte | n/a    | 'S' - End of Last Sale Elig  | §2.5.2.2
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.2.2
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.2.2
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.2.2
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.2.2
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.2.2
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+    Notes: [§2.5.2.2]
+    - Generated 10 seconds after market close from primary market
+
+QuoteWipeOutMessage (CP) [§2.5.3.1]
+    @offset | @size | field_name  | type | endian | description                  | source
+    --------|-------|-------------|------|--------|------------------------------|--------
+    0       | 1     | version     | byte | n/a    | '1' - Protocol Version       | §2.5.3.1
+    1       | 1     | msgCategory | byte | n/a    | 'C' - Control Messages       | §2.5.3.1
+    2       | 1     | msgType     | byte | n/a    | 'P' - Quote Wipe-Out         | §2.5.3.1
+    3       | 1     | orig        | byte | n/a    | Market Center Originator ID  | §2.5.3.1
+    4       | 1     | subMarketId | byte | n/a    | Sub Market Center ID         | §2.5.3.1
+    5       | 8     | sipTime     | long | BE     | SIP Timestamp                | §2.5.3.1
+    13      | 8     | timestamp1  | long | BE     | Participant Timestamp        | §2.5.3.1
+    21      | 8     | partToken   | long | BE     | Participant Token            | §2.5.3.1
+    --------|-------|-------------|------|--------|------------------------------|--------
+    Total: 29 bytes
+
+    Notes: [§2.5.3.1]
+    - Zeroes all quotes for identified market center
+    - Only sent when participant removes quotes from ALL securities
+
+--- ENUMS ---
+
+MessageCategory (byte) [§1.3]
+    Value | Name          | Description                          | Source
+    ------|---------------|--------------------------------------|--------
+    'Q'   | Quote         | Quote Messages (UQDF)                | §1.3
+    'T'   | Trade         | Trade Messages (UTDF)                | §1.3
+    'A'   | Admin         | Administrative Messages              | §1.3
+    'V'   | Volume        | Volume Administrative Messages       | §1.3
+    'C'   | Control       | Control Messages                     | §1.3
+
+QuoteMessageType (byte) [§1.3, §2.2]
+    Value | Name        | Description                            | Source
+    ------|-------------|----------------------------------------|--------
+    'E'   | QE          | UTP Quote Short-form (retiring)        | §1.3, §2.2.1
+    'F'   | QF          | UTP Quote Long-form (retiring)         | §1.3, §2.2.2
+    'M'   | QM          | FINRA ADF Market Participant Quote     | §1.3, §2.2.3
+    'A'   | QA          | Odd Lot Quote Short Form               | §1.3, §2.2.4.3
+    'B'   | QB          | Odd Lot Quote Long Form                | §1.3, §2.2.4.4
+    'C'   | QC          | Combined Quote Short Form              | §1.3, §2.2.4.1
+    'D'   | QD          | Combined Quote Long Form               | §1.3, §2.2.4.2
+
+TradeMessageType (byte) [§1.3, §2.3]
+    Value | Name | Description                              | Source
+    ------|------|------------------------------------------|--------
+    'M'   | TM   | Trade Report Short-form                  | §1.3, §2.3.1
+    'N'   | TN   | Trade Report Long-form                   | §1.3, §2.3.2
+    'O'   | TO   | Trade Cancel/Error                       | §1.3, §2.3.3
+    'P'   | TP   | Trade Correction                         | §1.3, §2.3.4
+    'Q'   | TQ   | Prior Day As-Of Trade                    | §1.3, §2.3.5
+
+AdminMessageType (byte) [§1.3, §2.4]
+    Value | Name | Description                              | Source
+    ------|------|------------------------------------------|--------
+    'A'   | AA   | General Administrative                   | §1.3, §2.4.1.1
+    'H'   | AH   | CROSS SRO Trading Action                 | §1.3, §2.4.1.2
+    'K'   | AK   | Market Center Trading Action             | §1.3, §2.4.1.3
+    'B'   | AB   | Issue Symbol Directory                   | §1.3, §2.4.1.4
+    'V'   | AV   | Reg SHO Short Sale Restrict Indicator    | §1.3, §2.4.1.5
+    'P'   | AP   | Limit Up - Limit Down Price Band         | §1.3, §2.4.1.6
+    'C'   | AC   | Market Wide Circuit Breaker Decline      | §1.3, §2.4.1.7
+    'D'   | AD   | Market Wide Circuit Breaker Status       | §1.3, §2.4.1.8
+    'U'   | AU   | Closing Trade Summary Report             | §1.3, §2.4.2.1
+    'V'   | VV   | Total Consolidated and Market Volume     | §1.3, §2.4.2.2
+    'R'   | AR   | Session Close Recap                      | §1.3, §2.4.3.1
+    'E'   | AE   | Auction Collar Message                   | §1.3, §2.4.1.9
+
+ControlMessageType (byte) [§1.3, §2.5]
+    Value | Name | Description                              | Source
+    ------|------|------------------------------------------|--------
+    'I'   | CI   | Start Of Day                             | §1.3, §2.5.1.1
+    'J'   | CJ   | End Of Day                               | §1.3, §2.5.1.2
+    'O'   | CO   | Market Session Open                      | §1.3, §2.5.1.3
+    'C'   | CC   | Market Session Close                     | §1.3, §2.5.1.4
+    'Z'   | CZ   | End Of Transmissions                     | §1.3, §2.5.1.5
+    'X'   | CX   | End Of Trade Reporting                   | §1.3, §2.5.2.1
+    'S'   | CS   | End Of Consolidated Last Sale Eligible   | §1.3, §2.5.2.2
+    'P'   | CP   | Quote Wipe-Out                           | §1.3, §2.5.3.1
+
+MarketCenterOriginatorID (byte) [§3.1]
+    Value | Name            | Description                        | Source
+    ------|-----------------|------------------------------------|---------
+    'Y'   | CBOE_BYX        | Cboe BYX Exchange, Inc.            | §3.1
+    'Z'   | CBOE_BZX        | Cboe BZX Exchange, Inc.            | §3.1
+    'J'   | CBOE_EDGA       | Cboe EDGA Exchange, Inc.           | §3.1
+    'K'   | CBOE_EDGX       | Cboe EDGX Exchange, Inc.           | §3.1
+    'W'   | CBOE            | Cboe Exchange, Inc.                | §3.1
+    'B'   | NASDAQ_BX       | Nasdaq BX, Inc.                    | §3.1
+    'X'   | NASDAQ_PHLX     | Nasdaq PHLX LLC                    | §3.1
+    'Q'   | NASDAQ          | Nasdaq, Inc.                       | §3.1
+    'I'   | NASDAQ_ISE      | Nasdaq ISE, LLC                    | §3.1
+    'N'   | NYSE            | New York Stock Exchange LLC        | §3.1
+    'P'   | NYSE_ARCA       | NYSE Arca, Inc.                    | §3.1
+    'A'   | NYSE_AMERICAN   | NYSE American, LLC                 | §3.1
+    'C'   | NYSE_NATIONAL   | NYSE National, Inc.                | §3.1
+    'M'   | NYSE_TEXAS      | NYSE Texas                         | §3.1
+    'G'   | 24X             | 24X National Exchange, LLC         | §3.1
+    'D'   | FINRA           | FINRA                              | §3.1
+    'V'   | IEX             | Investors' Exchange LLC            | §3.1
+    'L'   | LTSE            | Long-Term Stock Exchange           | §3.1
+    'H'   | MIAX            | MIAX Pearl, LLC                    | §3.1
+    'U'   | MEMX            | MEMX LLC                           | §3.1
+    'E'   | SIP             | Market Independent (SIP Generated) | §3.1
+
+SubMarketCenterID (byte) [§3.2]
+    Value   | Name              | Description                      | Source
+    --------|-------------------|----------------------------------|--------
+    'N'     | FINRA_NYSE_TRF    | FINRA / NYSE TRF                 | §3.2
+    'Q'     | FINRA_NASDAQ_CART | FINRA / Nasdaq TRF Carteret      | §3.2
+    'B'     | FINRA_NASDAQ_CHI  | FINRA / Nasdaq TRF Chicago       | §3.2
+    <space> | FINRA_ADF         | FINRA Alternative Display Fac    | §3.2
+
+QuoteConditionCode (byte) [§3.3]
+    Value | Name                  | Description                      | NBBO Eligible | Source
+    ------|-----------------------|----------------------------------|---------------|--------
+    'A'   | MANUAL_ASK_AUTO_BID   | Manual Ask, automated Bid        | Yes           | §3.3
+    'B'   | MANUAL_BID_AUTO_ASK   | Manual Bid, automated Ask        | Yes           | §3.3
+    'F'   | FAST_TRADING          | Fast trading                     | No            | §3.3
+    'H'   | MANUAL_BID_AND_ASK    | Manual Bid and Ask               | Yes           | §3.3
+    'I'   | ORDER_IMBALANCE       | Order imbalance                  | No            | §3.3
+    'L'   | CLOSED                | Closed quote                     | No            | §3.3
+    'N'   | NON_FIRM              | Non-firm quote                   | No            | §3.3
+    'O'   | OPENING_AUTO          | Opening quote automated          | Yes           | §3.3
+    'R'   | REGULAR_AUTO          | Regular, two-sided open auto     | Yes           | §3.3
+    'U'   | MANUAL_NON_FIRM       | Manual Bid and Ask (non-firm)    | No            | §3.3
+    'X'   | ORDER_INFLUX          | Order influx                     | No            | §3.3
+    'Y'   | ONE_SIDED_AUTO        | Auto bid, no offer; or vice versa| Yes           | §3.3
+    'Z'   | NO_OPEN_RESUME        | No open/no resume                | No            | §3.3
+    '4'   | INTRADAY_AUCTION      | Intraday Auction                 | No            | §3.3
+
+NBBOQuoteCondition (byte) [§3.3]
+    Value | Name                | Description                        | Source
+    ------|---------------------|------------------------------------|---------
+    'L'   | NBBO_CLOSED         | NBBO Closed                        | §3.3
+    'R'   | NBBO_REGULAR        | NBBO Regular, two-sided open       | §3.3
+    'Y'   | NBBO_ONE_SIDED      | NBBO Regular, one-sided open       | §3.3
+
+SIPGeneratedUpdate (byte) [§3.4]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    <space> | PARTICIPANT     | From market participant              | §3.4
+    'E'     | SIP_GENERATED   | SIP-generated (e.g. price band)      | §3.4
+
+LULDBBOIndicator (byte) [§3.5]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    <space> | NOT_APPLICABLE  | Limit Up Limit Down Not Applicable   | §3.5
+    'A'     | BID_ABOVE_UPPER | Bid above Upper Band - Non-Exec      | §3.5
+    'B'     | ASK_BELOW_LOWER | Ask below Lower Band - Non-Exec      | §3.5
+    'C'     | BOTH_OUTSIDE    | Bid and Ask outside band - Non-Exec  | §3.5
+
+LULDNationalBBOIndicator (byte) [§3.6]
+    Value   | Name                | Description                      | Source
+    --------|---------------------|----------------------------------|--------
+    <space> | NOT_APPLICABLE      | LULD Not Applicable              | §3.6
+    'A'     | EXECUTABLE          | NBB and NBO Executable           | §3.6
+    'B'     | NBB_NON_EXEC        | NBB below Lower Band             | §3.6
+    'C'     | NBO_NON_EXEC        | NBO above Upper Band             | §3.6
+    'D'     | BOTH_NON_EXEC       | NBB below, NBO above bands       | §3.6
+    'E'     | NBB_LIMIT_STATE     | NBB equals Upper Band            | §3.6
+    'F'     | NBO_LIMIT_STATE     | NBO equals Lower Band            | §3.6
+    'G'     | NBB_LIMIT_NBO_NON   | NBB Limit State, NBO Non-Exec    | §3.6
+    'H'     | NBO_LIMIT_NBB_NON   | NBO Limit State, NBB Non-Exec    | §3.6
+    'I'     | CROSSED_NOT_LIMIT   | NBB=Upper, NBO=Lower (crossed)   | §3.6
+
+RetailInterestCode (byte) [§3.7]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    <space> | NOT_APPLICABLE  | Retail Interest Not Applicable       | §3.7
+    'A'     | ON_BID          | Retail Interest On Bid Quote         | §3.7
+    'B'     | ON_ASK          | Retail Interest On Ask Quote         | §3.7
+    'C'     | ON_BOTH         | Retail Interest On both Bid and Ask  | §3.7
+
+NBBOAppendageIndicator (byte) [§3.8]
+    Value | Name              | Description                          | Source
+    ------|-------------------|--------------------------------------|--------
+    '0'   | NO_CHANGE         | No NBBO Change, no appendage         | §3.8
+    '1'   | CANNOT_CALCULATE  | Cannot calculate NBBO, no appendage  | §3.8
+    '2'   | SHORT_FORM        | Short Form NBBO Appendage Attached   | §3.8
+    '3'   | LONG_FORM         | Long Form NBBO Appendage Attached    | §3.8
+    '4'   | QUOTE_IS_NBBO     | Quote Contains All NBBO Info         | §3.8
+
+FINRAADFMPIDAppendageIndicator (byte) [§3.9]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    <space> | NOT_APPLICABLE  | Not from FINRA, no appendage         | §3.9
+    '0'     | NO_CHANGE       | No ADF MPID changes, no appendage    | §3.9
+    '1'     | NO_MPID_EXISTS  | No ADF MPID exists, no appendage     | §3.9
+    '2'     | ATTACHED        | ADF MPID(s) attached                 | §3.9
+
+ConsolidatedPriceChangeIndicator (byte) [§3.10]
+    Value | Name                        | Description                    | Source
+    ------|-----------------------------|--------------------------------|--------
+    '0'   | NO_CHANGE                   | No prices changed              | §3.10
+    '1'   | LAST_CHANGED                | Consolidated Last changed      | §3.10
+    '2'   | LOW_CHANGED                 | Consolidated Low changed       | §3.10
+    '3'   | LAST_AND_LOW_CHANGED        | Consolidated Last and Low      | §3.10
+    '4'   | HIGH_CHANGED                | Consolidated High changed      | §3.10
+    '5'   | LAST_AND_HIGH_CHANGED       | Consolidated Last and High     | §3.10
+    '6'   | HIGH_AND_LOW_CHANGED        | Consolidated High and Low      | §3.10
+    '7'   | ALL_CHANGED                 | All Consolidated prices        | §3.10
+
+ParticipantPriceChangeIndicator (byte) [§3.11]
+    Value | Name                        | Description                    | Source
+    ------|-----------------------------|--------------------------------|--------
+    '0'   | NO_CHANGE                   | No prices changed              | §3.11
+    '1'   | LAST_CHANGED                | Participant Last changed       | §3.11
+    '2'   | LOW_CHANGED                 | Participant Low changed        | §3.11
+    '3'   | LAST_AND_LOW_CHANGED        | Participant Last and Low       | §3.11
+    '4'   | HIGH_CHANGED                | Participant High changed       | §3.11
+    '5'   | LAST_AND_HIGH_CHANGED       | Participant Last and High      | §3.11
+    '6'   | HIGH_AND_LOW_CHANGED        | Participant High and Low       | §3.11
+    '7'   | ALL_CHANGED                 | All Participant prices         | §3.11
+
+RegSHOActionCode (byte) [§3.12]
+    Value | Name                  | Description                        | Source
+    ------|-----------------------|------------------------------------|---------
+    '0'   | NO_PRICE_TEST         | No price test in effect            | §3.12
+    '1'   | IN_EFFECT             | Reg SHO in effect (intra-day drop) | §3.12
+    '2'   | REMAINS_IN_EFFECT     | Reg SHO Restriction remains        | §3.12
+
+TradeThroughExemptCode (byte) [§3.13]
+    Value   | Name          | Description                          | Source
+    --------|---------------|--------------------------------------|--------
+    'X'     | EXEMPT        | 611 Trade Through Exempt             | §3.13
+    <space> | NOT_EXEMPT    | Not 611 Trade Through Exempt         | §3.13
+
+TradeCancelTypeCode (byte) [§3.15]
+    Value | Name   | Description            | Source
+    ------|--------|------------------------|--------
+    'C'   | CANCEL | Cancel                 | §3.15
+    'E'   | ERROR  | Error                  | §3.15
+
+AsOfAction (byte) [§3.16]
+    Value | Name     | Description            | Source
+    ------|----------|------------------------|--------
+    'A'   | ADDITION | As-Of Trade Addition   | §3.16
+    'C'   | CANCEL   | As-Of Trade Cancel     | §3.16
+
+TradingActionReasonCode (byte[6]) [§3.17]
+    Value    | Name                   | Description                        | Source
+    ---------|------------------------|------------------------------------|---------
+    "T1    " | HALT_NEWS_PENDING      | Halt News Pending                  | §3.17
+    "T2    " | HALT_NEWS_DISSEM       | Halt News Dissemination            | §3.17
+    "T5    " | PAUSE_IN_EFFECT        | Single Stock Trading Pause         | §3.17
+    "T6    " | HALT_EMA               | Halt Extraordinary Market Activity | §3.17
+    "T8    " | HALT_ETF               | Halt ETF                           | §3.17
+    "T12   " | HALT_INFO_REQUESTED    | Halted for info requested by NASDAQ| §3.17
+    "H4    " | HALT_NON_COMPLIANCE    | Halt Non Compliance                | §3.17
+    "H9    " | HALT_FILINGS_NOT_CURR  | Halt Filings Not Current           | §3.17
+    "H10   " | HALT_SEC_SUSPENSION    | Halt SEC Trading Suspension        | §3.17
+    "H11   " | HALT_REG_CONCERN       | Halt Regulatory Concern            | §3.17
+    "O1    " | HALT_OPERATIONS        | Operations Halt                    | §3.17
+    "IPO1  " | IPO_NOT_YET_TRADING    | IPO Issue not yet Trading          | §3.17
+    "M1    " | CORPORATE_ACTION       | Corporate Action                   | §3.17
+    "M2    " | QUOTE_NOT_AVAILABLE    | Quotation Not Available            | §3.17
+    "LUDP  " | VOLATILITY_PAUSE       | Volatility Trading Pause           | §3.17
+    "LUDS  " | VOLATILITY_STRADDLE    | Volatility Pause - Straddle        | §3.17
+    "MWC1  " | MWCB_LEVEL_1           | MWCB Halt - Level 1                | §3.17
+    "MWC2  " | MWCB_LEVEL_2           | MWCB Halt - Level 2                | §3.17
+    "MWC3  " | MWCB_LEVEL_3           | MWCB Halt - Level 3                | §3.17
+    "MWC0  " | MWCB_CARRYOVER         | MWCB Halt - Carryover              | §3.17
+    "T3    " | NEWS_RESUMPTION        | News and Resumption Times          | §3.17
+    "T7    " | PAUSE_QUOTE_ONLY       | Pause/Quotation-Only Period        | §3.17
+    "R4    " | QUAL_RESOLVED_RESUME   | Qualifications Resolved; Resume    | §3.17
+    "R9    " | FILINGS_MET_RESUME     | Filing Requirements Met; Resume    | §3.17
+    "C3    " | NEWS_NOT_FORTH_RESUME  | News Not Forthcoming; Resume       | §3.17
+    "C4    " | QUAL_MAINT_MET_RESUME  | Qualifications Maint Met; Resume   | §3.17
+    "C9    " | QUAL_FILINGS_MET       | Qualifications/Filings Met         | §3.17
+    "C11   " | OTHER_REG_RESUME       | Other Regulatory Auth Resume       | §3.17
+    "R1    " | NEW_ISSUE_AVAILABLE    | New Issue Available                | §3.17
+    "R2    " | ISSUE_AVAILABLE        | Issue Available                    | §3.17
+    "IPOQ  " | IPO_QUOTE_RELEASED     | IPO released for quotation         | §3.17
+    "IPOE  " | IPO_WINDOW_EXT         | IPO positioning window extension   | §3.17
+    "MWCQ  " | MWCB_RESUMPTION        | Market Wide Circuit Breaker Resume | §3.17
+    "      " | REASON_NOT_AVAILABLE   | Reason Not Available               | §3.17
+
+TradingActionCode (byte) [§3.18]
+    Value | Name                | Description                        | Source
+    ------|---------------------|------------------------------------|---------
+    'H'   | HALT                | Trading Halt                       | §3.18
+    'Q'   | QUOTE_RESUMPTION    | Quotation Resumption (incl EMA)    | §3.18
+    'T'   | TRADE_RESUMPTION    | Trading Resumption                 | §3.18
+    'P'   | VOLATILITY_PAUSE    | Volatility Trading Pause           | §3.18
+
+MarketCenterCloseIndicator (byte) [§3.19]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    'M'     | OFFICIAL_CLOSE  | Based on 'M' sale condition          | §3.19
+    <space> | NOT_OFFICIAL    | Not based on 'M' sale condition      | §3.19
+
+TradingActionIndicator (byte) [§3.20]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    'H'     | HALT_IN_EFFECT  | Trading Halt In Effect               | §3.20
+    <space> | REGULAR_TRADING | Regular Trading In Effect            | §3.20
+
+SpecialCondition (byte) [§3.21]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    'O'     | ONE_SIDED       | One-sided National BBO at Close      | §3.21
+    'H'     | HALT            | Trading Halt In Effect at Close      | §3.21
+    'M'     | NO_QUOTES       | No Eligible MP Quotes at Close       | §3.21
+    <space> | NONE            | No Special Condition exists          | §3.21
+
+Authenticity (byte) [§3.22]
+    Value | Name       | Description            | Source
+    ------|------------|------------------------|--------
+    'P'   | PRODUCTION | Live/Production        | §3.22
+    'T'   | TEST       | Test                   | §3.22
+    'D'   | DEMO       | Demo                   | §3.22
+    'X'   | DELETED    | Deleted                | §3.22
+
+IssueType (byte) [§3.23]
+    Value | Name                      | Description                    | Source
+    ------|---------------------------|--------------------------------|--------
+    'A'   | ADR                       | American Depository Receipt    | §3.23
+    'B'   | BOND                      | Bond                           | §3.23
+    'C'   | COMMON_STOCK              | Common Stock                   | §3.23
+    'F'   | DEPOSITORY_RECEIPT        | Depository Receipt             | §3.23
+    'I'   | 144A                      | 144A                           | §3.23
+    'L'   | LIMITED_PARTNERSHIP       | Limited Partnership            | §3.23
+    'N'   | NOTE                      | Note                           | §3.23
+    'O'   | ORDINARY_SHARES           | Ordinary Shares                | §3.23
+    'P'   | PREFERRED_STOCK           | Preferred Stock                | §3.23
+    'Q'   | OTHER_SECURITIES          | Other Securities               | §3.23
+    'R'   | RIGHTS                    | Rights                         | §3.23
+    'S'   | BENEFICIAL_INTEREST       | Shares of Beneficial Interest  | §3.23
+    'T'   | CONVERTIBLE_DEBENTURE     | Convertible Debenture          | §3.23
+    'U'   | UNIT                      | Unit                           | §3.23
+    'V'   | UNITS_BENEFICIAL_INTEREST | Units of Beneficial Interest   | §3.23
+    'W'   | WARRANT                   | Warrant                        | §3.23
+
+MarketTier (byte) [§3.25]
+    Value | Name                | Description                      | Source
+    ------|---------------------|----------------------------------|--------
+    'Q'   | GLOBAL_SELECT       | Nasdaq Global Select Market      | §3.25
+    'G'   | GLOBAL              | Nasdaq Global Market             | §3.25
+    'S'   | CAPITAL             | Nasdaq Capital Market            | §3.25
+
+ShortSaleThresholdIndicator (byte) [§3.26]
+    Value   | Name            | Description                          | Source
+    --------|-----------------|--------------------------------------|--------
+    'Y'     | RESTRICTED      | Restricted under SEC Rule 203(b)(3)  | §3.26
+    'N'     | NOT_RESTRICTED  | Issue is not restricted              | §3.26
+    <space> | NOT_AVAILABLE   | Threshold Indicator not available    | §3.26
+
+FinancialStatusIndicator (byte) [§3.27]
+    Value | Name                   | Description                        | Source
+    ------|------------------------|------------------------------------|---------
+    'C'   | CREATIONS_SUSPENDED    | Creations/Redemptions Suspended    | §3.27
+    'D'   | DEFICIENT              | Deficient: Failed Listing Req      | §3.27
+    'E'   | DELINQUENT             | Delinquent: Missed Filing Deadline | §3.27
+    'Q'   | BANKRUPT               | Bankrupt: Filed for Bankruptcy     | §3.27
+    'N'   | NORMAL                 | Normal (Default)                   | §3.27
+    'G'   | DEFICIENT_BANKRUPT     | Deficient and Bankrupt             | §3.27
+    'H'   | DEFICIENT_DELINQUENT   | Deficient and Delinquent           | §3.27
+    'J'   | DELINQUENT_BANKRUPT    | Delinquent and Bankrupt            | §3.27
+    'K'   | ALL_THREE              | Deficient, Delinquent, Bankrupt    | §3.27
+
+LULDPriceBandIndicator (byte) [§3.28]
+    Value   | Name              | Description                        | Source
+    --------|-------------------|------------------------------------|---------
+    'A'     | OPENING_UPDATE    | Opening Update                     | §3.28
+    'B'     | INTRA_DAY_UPDATE  | Intra-Day Update                   | §3.28
+    'C'     | RESTATED_VALUE    | Restated Value                     | §3.28
+    'D'     | SUSPENDED         | Suspended during halt/pause        | §3.28
+    'E'     | RE_OPENING_UPDATE | Re-Opening Update                  | §3.28
+    'F'     | OUTSIDE_HOURS     | Outside price band rule hours      | §3.28
+    <space> | NONE_PROVIDED     | None provided                      | §3.28
+
+MWCBStatusLevelIndicator (byte) [§3.29]
+    Value | Name    | Description                              | Source
+    ------|---------|------------------------------------------|--------
+    '1'   | LEVEL_1 | MWCB Level 1 Breached (7% decline)       | §3.29
+    '2'   | LEVEL_2 | MWCB Level 2 Breached (13% decline)      | §3.29
+    '3'   | LEVEL_3 | MWCB Level 3 Breached (20% decline)      | §3.29
+
+BOLOAppendageIndicator (byte) [§3.30]
+    Value | Name              | Description                          | Source
+    ------|-------------------|--------------------------------------|--------
+    '0'   | NO_CHANGE         | No BOLO Change, no appendage         | §3.30
+    '1'   | CANNOT_CALCULATE  | Cannot calculate BOLO, no appendage  | §3.30
+    '2'   | SHORT_FORM        | Short Form BOLO Appendage Attached   | §3.30
+    '3'   | LONG_FORM         | Long Form BOLO Appendage Attached    | §3.30
+    '5'   | MPID_FORM         | MPID Form BOLO Appendage Attached    | §3.30
+
+OddLotAttachmentType (byte) [§3.31]
+    Value | Name              | Description                          | Source
+    ------|-------------------|--------------------------------------|--------
+    '0'   | NONE              | No Odd Lot Price Levels attached     | §3.31
+    '2'   | SHORT_FORM        | Short Form Odd Lot attached          | §3.31
+    '3'   | LONG_FORM         | Long Form Odd Lot attached           | §3.31
+    '5'   | MPID_FORM         | MPID Form Odd Lot attached           | §3.31
+
+RoundLotSize (short) [§3.32]
+    Price Range         | Round Lot Size | Source
+    --------------------|----------------|--------
+    $0.00 - $250.00     | 100            | §3.32
+    $250.01 - $1000.00  | 40             | §3.32
+    $1000.01 - $10000.00| 10             | §3.32
+    $10000.01+          | 1              | §3.32
+
+SaleConditionModifier (byte) [§3.14, §3.14.1]
+    Value | Name                       | Description                        | Source
+    ------|----------------------------|------------------------------------|---------
+    '@'   | REGULAR_SALE               | Regular Sale                       | §3.14.1
+    'A'   | ACQUISITION                | Acquisition                        | §3.14.1
+    'B'   | BUNCHED_TRADE              | Bunched Trade                      | §3.14.1
+    'C'   | CASH_SALE                  | Cash Sale                          | §3.14.1
+    'D'   | DISTRIBUTION               | Distribution                       | §3.14.1
+    'E'   | PLACEHOLDER                | Placeholder                        | §3.14.1
+    'F'   | INTERMARKET_SWEEP          | Intermarket Sweep                  | §3.14.1
+    'G'   | BUNCHED_SOLD_TRADE         | Bunched Sold Trade                 | §3.14.1
+    'H'   | PRICE_VARIATION_TRADE      | Price Variation Trade              | §3.14.1
+    'I'   | ODD_LOT_TRADE              | Odd Lot Trade                      | §3.14.1
+    'K'   | RULE_155_TRADE             | Rule 155 Trade (AMEX)              | §3.14.1
+    'L'   | SOLD_LAST                  | Sold Last                          | §3.14.1
+    'M'   | MARKET_CENTER_CLOSE        | Market Center Official Close       | §3.14.1
+    'N'   | NEXT_DAY_RESERVED          | Next Day Reserved                  | §3.14.1
+    'O'   | OPENING_PRINTS             | Opening Prints                     | §3.14.1
+    'P'   | PRIOR_REFERENCE_PRICE      | Prior Reference Price              | §3.14.1
+    'Q'   | MARKET_CENTER_OPEN         | Market Center Official Open        | §3.14.1
+    'R'   | SELLER                     | Seller                             | §3.14.1
+    'S'   | SPLIT_TRADE                | Split Trade                        | §3.14.1
+    'T'   | FORM_T                     | Form T                             | §3.14.1
+    'U'   | EXTENDED_HOURS_OOS         | Extended trading hours (OOS)       | §3.14.1
+    'V'   | CONTINGENT_TRADE           | Contingent Trade                   | §3.14.1
+    'W'   | AVERAGE_PRICE_TRADE        | Average Price Trade                | §3.14.1
+    'X'   | CROSS_PERIODIC_AUCTION     | Cross/Periodic Auction Trade       | §3.14.1
+    'Y'   | YELLOW_FLAG                | Yellow Flag Regular Trade          | §3.14.1
+    'Z'   | SOLD_OUT_OF_SEQUENCE       | Sold (out of sequence)             | §3.14.1
+    '1'   | STOPPED_STOCK              | Stopped Stock (Regular Trade)      | §3.14.1
+    '4'   | DERIVATIVELY_PRICED        | Derivatively priced                | §3.14.1
+    '5'   | RE_OPENING_PRINTS          | Re-Opening Prints                  | §3.14.1
+    '6'   | CLOSING_PRINTS             | Closing Prints                     | §3.14.1
+    '7'   | QCT                        | Qualified Contingent Trade         | §3.14.1
+    '8'   | PLACEHOLDER_611_EXEMPT     | Placeholder For 611 Exempt         | §3.14.1
+    '9'   | CORRECTED_CONS_CLOSE       | Corrected Consolidated Close       | §3.14.1
+
+--- VARIABLE LENGTH RULES ---
+
+varbyte[] Fields [§1.2.1]
+- Length is contained in the immediately preceding field in the same message
+- Example: textLen (short) followed by text (varbyte[]) in AA message
+- Read the length field first, then read that many bytes for the variable field
+
+Odd Lot Attachments [§2.2.8]
+- Number of attachments determined by olAttachmentCount field
+- Size of each attachment determined by olAttachmentType:
+  - Type '2': 6 bytes per attachment (Short Form)
+  - Type '3': 12 bytes per attachment (Long Form)
+  - Type '5': 16 bytes per attachment (ADF MPID Form)
+
+Market Center Attachments [§2.4.2.1, §2.4.2.2, §2.4.3.1]
+- Number of attachments determined by numMktCenterAttch field
+- Size depends on specific message type
+
+--- PARSING SEQUENCE ---
+
+1. Read 3 bytes: version, msgCategory, msgType [§2.1]
+2. Dispatch based on (msgCategory, msgType) tuple [§1.3]
+3. Read remaining header fields (26 bytes for standard header) [§2.1]
+4. Read message-specific fields based on message type
+5. For Quote messages with appendages:
+   a. Check nbboIndicator to determine NBBO appendage presence/type [§3.8]
+   b. Check finraAdfMpidIndicator for ADF MPID appendage (long-form only) [§3.9]
+   c. Check boloIndicator to determine BOLO appendage presence/type [§3.30]
+   d. Check olAttachmentType and olAttachmentCount for Odd Lot attachments [§3.31]
+   e. Parse appendages in order: NBBO → ADF MPID → BOLO → Odd Lot
+6. For messages with Market Center Attachments:
+   a. Read numMktCenterAttch
+   b. Parse that many attachment structures
+
+--- SPECIAL CASES ---
+
+Short Form vs Long Form Selection [§2.2.1, §2.3.1]
+Short form is used when ALL of the following are true:
+- Symbol ≤ 5 characters
+- Prices ≤ $655.35 (max value for 2-byte short with 2 decimals)
+- Prices use only 2 decimal places
+- Sizes < 65,535
+- Quote: Not from FINRA
+- Trade Short Form: Sale condition ≠ 'R' (Seller)
+
+Timestamp Handling [§2.1, §2.2.2, §2.3]
+- timestamp1: Always participant timestamp
+- timestamp2: 
+  - From Exchange: Set to 0
+  - From FINRA ADF/TRF: Contains FINRA proprietary feed timestamp
+  - If no proprietary feed: Set to 0
+
+Trade ID Uniqueness [§2.3]
+- tradeId is unique per: (orig, subMarketId, symbol, session)
+- For As-Of trades (TQ): tradeId is pass-through, no uniqueness guarantee
+
+Price Level Removal [§2.2.8]
+- An Odd Lot Price Level with olPrice=0 and olSize=0 indicates removal
+
+Message Retirement Schedule [§1, §2.2]
+- QE, QF messages: Retiring April 27, 2026
+- QM message: Continuing support
+- New QA, QB, QC, QD messages: Available April 27, 2026
+
+Round Lot Changes [§1, §2.4.1.4]
+- Effective November 3, 2025: New Round Lot tier designations
+- Quote sizes now in actual shares (rounded down to round lot multiple)
+
+Fractional Share Support [§1, §2.3]
+- New trade messages (TM, TN, TO, TP, TQ): Effective February 23, 2026
+- Volume fields use 6 implied decimal places for fractional share support
+
+--- CROSS-REFERENCE INDEX ---
+
+Section 1: Overview and release schedule
+Section 1.1: Introduction - protocol delivery via MoldUDP64
+Section 1.2: Data Types definitions
+Section 1.2.1: Table of Types
+Section 1.2.2: Numeric Types (endianness, decimal places)
+Section 1.2.3: Alpha Types (ASCII encoding, padding)
+Section 1.3: Message Table (all message categories and types)
+
+Section 2: Message Structures
+Section 2.1: Message Header (29-byte common header)
+Section 2.2: UTP Quotation Messages (UQDF)
+Section 2.2.1: UTP Quote Message Short-form (QE)
+Section 2.2.2: UTP Quote Message Long-form (QF)
+Section 2.2.3: FINRA ADF Market Participant Quotation Message (QM)
+Section 2.2.4: New Combined/Odd Lot Quote Messages
+Section 2.2.4.1: Combined Quote Message Short Form (QC)
+Section 2.2.4.2: Combined Quote Message Long Form (QD)
+Section 2.2.4.3: Odd Lot Quote Message Short Form (QA)
+Section 2.2.4.4: Odd Lot Quote Message Long Form (QB)
+Section 2.2.5: National BBO Appendage
+Section 2.2.5.1: National BBO Appendage Short-form
+Section 2.2.5.2: National BBO Appendage Long-form
+Section 2.2.6: FINRA ADF MPID Appendage
+Section 2.2.7: BOLO Appendage
+Section 2.2.7.1: BOLO Appendage Short Form
+Section 2.2.7.2: BOLO Appendage Long Form
+Section 2.2.7.3: BOLO Appendage MPID Form
+Section 2.2.8: Odd Lot Attachment Type
+Section 2.2.8.1: Odd Lot Price Level Attachment Short Form
+Section 2.2.8.2: Odd Lot Price Level Attachment Long Form
+Section 2.2.8.3: Odd Lot Price Level Attachment ADF MPID Form
+
+Section 2.3: Trade Messages (UTDF)
+Section 2.3.1: Trade Report Message Short-form (TM)
+Section 2.3.2: Trade Report Message Long-form (TN)
+Section 2.3.3: Trade Cancel/Error Message (TO)
+Section 2.3.4: Trade Correction Message (TP)
+Section 2.3.5: Prior Day As-Of Trade Message (TQ)
+
+Section 2.4: Administrative Messages
+Section 2.4.1: Trade and Quote Services (UQDF & UTDF)
+Section 2.4.1.1: General Administrative Message (AA)
+Section 2.4.1.2: CROSS SRO Trading Action Message (AH)
+Section 2.4.1.3: Market Center Trading Action Message (AK)
+Section 2.4.1.4: Issue Symbol Directory Message (AB)
+Section 2.4.1.5: Regulation SHO Short Sale Price Test Restricted Indicator (AV)
+Section 2.4.1.6: Limit Up – Limit Down Price Band Message (AP)
+Section 2.4.1.7: Market Wide Circuit Breaker Decline Level Message (AC)
+Section 2.4.1.8: Market Wide Circuit Breaker Status Message (AD)
+Section 2.4.1.9: Auction Collar Message (AE)
+Section 2.4.2: Trade Services Only (UTDF only)
+Section 2.4.2.1: Closing Trade Summary Report Message (AU)
+Section 2.4.2.2: Total Consolidated & Market Center Volume Message (VV)
+Section 2.4.3: Quote Services Only (UQDF only)
+Section 2.4.3.1: Session Close Recap Message (AR)
+
+Section 2.5: Control Messages
+Section 2.5.1: Trade and Quote Services (UQDF & UTDF)
+Section 2.5.1.1: Start Of Day (CI)
+Section 2.5.1.2: End Of Day (CJ)
+Section 2.5.1.3: Market Session Open (CO)
+Section 2.5.1.4: Market Session Close (CC)
+Section 2.5.1.5: End of Transmissions (CZ)
+Section 2.5.2: Trade Services Only (UTDF only)
+Section 2.5.2.1: End Of Trade Reporting (CX)
+Section 2.5.2.2: End of Consolidated Last Sale Eligibility (CS)
+Section 2.5.3: Quote Services Only (UQDF only)
+Section 2.5.3.1: Quote Wipe-Out (CP)
+
+Section 3: Code Definitions
+Section 3.1: Market Center Originator ID
+Section 3.2: Sub-Market Center ID
+Section 3.3: Quote Condition Code
+Section 3.4: SIP Generated Update
+Section 3.5: LULD BBO Indicator
+Section 3.6: LULD National BBO Indicator
+Section 3.7: Retail Interest Code
+Section 3.8: NBBO Appendage Indicator
+Section 3.9: FINRA ADF MPID Appendage Indicator
+Section 3.10: Consolidated Price Change Indicator
+Section 3.11: Participant Price Change Indicator
+Section 3.12: Reg SHO Action Code
+Section 3.13: Trade Through Exempt Code
+Section 3.14: Sale Condition
+Section 3.14.1: Sale Condition Modifiers
+Section 3.14.2: UTP Sale Condition Matrix
+Section 3.14.3: Sale Condition Combination Table
+Section 3.14.4: Sale Condition and Trade Through Exempt Combinations
+Section 3.14.5: Sale Condition Notes
+Section 3.15: Trade Cancel Type Code
+Section 3.16: As-Of Action
+Section 3.17: Trading Action Reason Code
+Section 3.18: Trading Action Code
+Section 3.19: Market Center Close Indicator
+Section 3.20: Trading Action Indicator
+Section 3.21: Special Condition
+Section 3.22: Authenticity
+Section 3.23: Issue Type
+Section 3.24: Issue Subtype
+Section 3.25: Market Tier
+Section 3.26: Short Sale Threshold Indicator
+Section 3.27: Financial Status Indicator
+Section 3.28: LULD Price Band Indicator
+Section 3.29: Market Wide Circuit Breaker Status Level Indicator
+Section 3.30: BOLO Appendage Indicator
+Section 3.31: Odd Lot Attachment Type
+Section 3.32: Round Lot Size
+
+Section 4: Revision History
+
+--- COMPLETENESS CHECK ---
+
+[x] All header structures (with section references)
+[x] All record/packet structures (with section references)
+[x] All enumerated types (with table references where applicable)
+[x] Byte order detection mechanism (Big-Endian throughout)
+[x] Length/count fields that control iteration
+[x] Version differences (QE/QF retiring, QA/QB/QC/QD new)
+[x] Cross-reference index mapping all cited sections/tables
