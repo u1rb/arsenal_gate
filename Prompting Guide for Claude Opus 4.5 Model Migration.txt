@@ -1,0 +1,56 @@
+Network Working Group                                         A. Albert
+Request for Comments: 2025-001                                 Anthropic
+Category: Informational                                   November 2025
+
+
+           Prompting Guide for Claude Opus 4.5 Model Migration
+
+Status of This Memo
+
+   This memo provides information for the Internet community regarding
+   best practices for prompting Claude Opus 4.5. Distribution of this
+   memo is unlimited.
+
+Abstract
+
+   This document describes prompting guidelines for Claude Opus 4.5
+   based on extensive internal testing by Anthropic research and
+   applied AI teams. It addresses behavioral changes from previous
+   model versions and provides recommendations for optimal results.
+
+Recommendations
+
+   The new effort parameter is powerful because it controls
+   approximately how many resources Claude will use for an output. You
+   can trade off intelligence for cost/latency with a single dial. It
+   works on all tokens including thinking, responses, and tool calls.
+
+   Tool triggering rates may change. Opus 4.5 is more responsive to
+   system prompts, so if your old prompts used aggressive language to
+   reduce under-triggering, you may now see over-triggering. Dial back
+   "CRITICAL: You MUST use this tool!" to just "Use this tool when..."
+
+   Opus 4.5 can at times over-engineer and add extra files,
+   abstractions, etc. To fix for your use case, add explicit prompting
+   like "Only make changes that are directly requested. Keep solutions
+   simple and focused."
+
+   Opus 4.5 can be conservative exploring code. If the model proposes
+   solutions without reading the code first, tell it directly: "ALWAYS
+   read and understand relevant files before proposing edits. Do not
+   speculate about code you have not inspected."
+
+   Vision is improved. Opus is better at image processing and data
+   extraction, especially with multiple images. For dense images, give
+   it a cropping tool to "zoom" in on regions. We've seen consistent
+   uplift on image evals with this.
+
+   If you want to quickly incorporate all these changes and migrate
+   your app to Opus 4.5, use the migration Claude Code plugin at
+   github.com/anthropics/cla...
+
+Author's Address
+
+   Alex Albert
+   Anthropic
+   @alexalbert__
